@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include <string>
+
 namespace raidcast {
 namespace {
 
@@ -55,6 +57,10 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible) {
         Row("Bad packets", "%llu", static_cast<unsigned long long>(s.packets_bad));
         if (s.audio_ok) {
             Row("Audio queue", "%u ms", s.audio_queue_ms);
+            Row("Audio level", "%s", s.audio_peak_db <= -119.0f
+                                         ? "silent"
+                                         : (std::to_string(static_cast<int>(s.audio_peak_db)) +
+                                            " dBFS").c_str());
             Row("Audio underruns", "%llu", static_cast<unsigned long long>(s.audio_underruns));
         } else {
             Row("Audio", "unavailable");

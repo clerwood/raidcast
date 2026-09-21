@@ -28,11 +28,17 @@ public:
     bool Push(const std::uint8_t* data, std::size_t len, std::string* error = nullptr);
 
     std::uint32_t queued_ms() const;
+
+    // Peak level of decoded audio since the last call, in dBFS (-120 = silence).
+    // Distinguishes "no audio arriving" from "audio arriving but silent" from
+    // "playing fine" - three states that are otherwise indistinguishable.
+    float TakePeakDbfs();
     std::uint64_t underruns() const;
     std::uint64_t trimmed() const;
 
+    struct Impl;  // public so the resampler helper can reach it
+
 private:
-    struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 

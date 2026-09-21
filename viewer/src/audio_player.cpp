@@ -12,6 +12,9 @@ extern "C" {
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -53,9 +56,18 @@ struct AudioPlayer::Impl {
     std::uint32_t dst_rate     = 48000;
     std::uint32_t dst_channels = 2;
 
+    // What the resampler is currently configured to accept. Set from the first
+    // decoded frame rather than assumed: FFmpeg's native Opus decoder emits
+    // planar float (fltp) while libopus emits interleaved (flt), and guessing
+    // wrong produces output that measures as silence rather than failing.
+    AVSampleFormat  swr_in_fmt  = AV_SAMPLE_FMT_NONE;
+    int             swr_in_rate = 0;
+    AVChannelLayout swr_in_layout{};
+
     mutable std::mutex mu;
     std::vector<float> queue;  // interleaved, device format
     std::atomic<std::uint64_t> underruns{0};
+    std::atomic<int>           peak_milli{0};  // peak |sample| * 1000
     std::atomic<std::uint64_t> trimmed{0};
 
     std::size_t QueuedFrames() const { return queue.size() / dst_channels; }
@@ -68,6 +80,18 @@ std::uint32_t AudioPlayer::queued_ms() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
     return static_cast<std::uint32_t>(impl_->QueuedFrames() * 1000 / impl_->dst_rate);
 }
+// (Re)builds the resampler when the decoder's actual output does not match what
+// it was last configured for. Called per frame; the comparison is cheap and the
+// rebuild happens once.
+static bool EnsureResampler(AudioPlayer::Impl* impl, const AVFrame* frame,
+                            std::string* error);
+
+float AudioPlayer::TakePeakDbfs() {
+    const int milli = impl_->peak_milli.exchange(0, std::memory_order_relaxed);
+    if (milli <= 0) return -120.0f;
+    return 20.0f * std::log10(static_cast<float>(milli) / 1000.0f);
+}
+
 std::uint64_t AudioPlayer::underruns() const {
     return impl_->underruns.load(std::memory_order_relaxed);
 }
@@ -124,17 +148,6 @@ bool AudioPlayer::Open(std::string* error) {
         AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, kBuffer, 0, mix, nullptr);
     CoTaskMemFree(mix);
     if (FAILED(init_hr)) return fail("IAudioClient::Initialize failed");
-
-    // The endpoint is usually already 48 kHz stereo float, in which case this is
-    // a passthrough; resample only because "usually" is not "always".
-    AVChannelLayout src_layout, dst_layout;
-    av_channel_layout_default(&src_layout, static_cast<int>(kSrcChannels));
-    av_channel_layout_default(&dst_layout, static_cast<int>(impl_->dst_channels));
-    if (swr_alloc_set_opts2(&impl_->swr, &dst_layout, AV_SAMPLE_FMT_FLT,
-                            static_cast<int>(impl_->dst_rate), &src_layout, AV_SAMPLE_FMT_FLT,
-                            kSrcRate, 0, nullptr) < 0 ||
-        swr_init(impl_->swr) < 0)
-        return fail("resampler setup failed");
 
     impl_->ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     impl_->stop  = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -218,6 +231,31 @@ bool AudioPlayer::Push(const std::uint8_t* data, std::size_t len, std::string* e
             return false;
         }
 
+        if (const char* dbg = std::getenv("RAIDCAST_AUDIO_DEBUG"); dbg && *dbg) {
+            static bool once = false;
+            if (!once) {
+                once = true;
+                float p0 = 0.0f, p1 = 0.0f;
+                const auto* c0 = reinterpret_cast<const float*>(impl_->frame->data[0]);
+                const auto* c1 = reinterpret_cast<const float*>(impl_->frame->data[1]);
+                for (int i = 0; i < impl_->frame->nb_samples; ++i) {
+                    if (c0) p0 = std::max(p0, std::fabs(c0[i]));
+                    if (c1) p1 = std::max(p1, std::fabs(c1[i]));
+                }
+                std::fprintf(stderr,
+                             "[audio] decoder=%s fmt=%s ch=%d rate=%d nb=%d "
+                             "linesize0=%d data1=%s plane0_peak=%.4f plane1_peak=%.4f\n",
+                             impl_->ctx->codec->name,
+                             av_get_sample_fmt_name(
+                                 static_cast<AVSampleFormat>(impl_->frame->format)),
+                             impl_->frame->ch_layout.nb_channels, impl_->frame->sample_rate,
+                             impl_->frame->nb_samples, impl_->frame->linesize[0],
+                             c1 ? "set" : "null", p0, p1);
+            }
+        }
+
+        if (!EnsureResampler(impl_.get(), impl_->frame, error)) return false;
+
         const int max_out = swr_get_out_samples(impl_->swr, impl_->frame->nb_samples);
         std::vector<float> converted(static_cast<std::size_t>(max_out) * impl_->dst_channels);
         auto* out_ptr = reinterpret_cast<std::uint8_t*>(converted.data());
@@ -227,6 +265,14 @@ bool AudioPlayer::Push(const std::uint8_t* data, std::size_t len, std::string* e
                                     impl_->frame->nb_samples);
         if (got <= 0) continue;
         converted.resize(static_cast<std::size_t>(got) * impl_->dst_channels);
+
+        float peak = 0.0f;
+        for (const float v : converted) peak = std::max(peak, std::fabs(v));
+        const int milli = static_cast<int>(peak * 1000.0f);
+        int prev = impl_->peak_milli.load(std::memory_order_relaxed);
+        while (milli > prev && !impl_->peak_milli.compare_exchange_weak(
+                                   prev, milli, std::memory_order_relaxed)) {
+        }
 
         std::lock_guard<std::mutex> lock(impl_->mu);
         impl_->queue.insert(impl_->queue.end(), converted.begin(), converted.end());
@@ -248,6 +294,34 @@ bool AudioPlayer::Push(const std::uint8_t* data, std::size_t len, std::string* e
     return true;
 }
 
+static bool EnsureResampler(AudioPlayer::Impl* impl, const AVFrame* frame,
+                            std::string* error) {
+    const auto fmt  = static_cast<AVSampleFormat>(frame->format);
+    const int  rate = frame->sample_rate;
+
+    if (impl->swr && impl->swr_in_fmt == fmt && impl->swr_in_rate == rate &&
+        av_channel_layout_compare(&impl->swr_in_layout, &frame->ch_layout) == 0)
+        return true;
+
+    if (impl->swr) swr_free(&impl->swr);
+
+    AVChannelLayout dst_layout;
+    av_channel_layout_default(&dst_layout, static_cast<int>(impl->dst_channels));
+
+    if (swr_alloc_set_opts2(&impl->swr, &dst_layout, AV_SAMPLE_FMT_FLT,
+                            static_cast<int>(impl->dst_rate), &frame->ch_layout, fmt, rate, 0,
+                            nullptr) < 0 ||
+        swr_init(impl->swr) < 0) {
+        if (error) *error = "could not configure the audio resampler";
+        return false;
+    }
+
+    impl->swr_in_fmt  = fmt;
+    impl->swr_in_rate = rate;
+    av_channel_layout_copy(&impl->swr_in_layout, &frame->ch_layout);
+    return true;
+}
+
 void AudioPlayer::Close() {
     if (!impl_) return;
 
@@ -263,6 +337,7 @@ void AudioPlayer::Close() {
     if (impl_->stop)  { CloseHandle(impl_->stop);  impl_->stop  = nullptr; }
 
     if (impl_->swr) swr_free(&impl_->swr);
+    av_channel_layout_uninit(&impl_->swr_in_layout);
     if (impl_->frame) av_frame_free(&impl_->frame);
     if (impl_->pkt) av_packet_free(&impl_->pkt);
     if (impl_->ctx) avcodec_free_context(&impl_->ctx);

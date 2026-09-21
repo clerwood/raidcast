@@ -35,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -183,16 +184,58 @@ int main(int argc, char** argv) {
         const bool capture_ok = CaptureProbeOk(target, device.get());
         std::printf("  capture  : %s\n", capture_ok ? "ok" : "FAILED");
 
-        AudioLoopback a;
-        AudioEncoder  ae;
-        std::string   aerr;
-        const bool audio_ok = ae.Open(96000, &aerr) &&
-                              a.Start(target.pid, [](const AudioChunk&) {}, &aerr);
+        // Capturing frames is not the same as capturing sound: process loopback
+        // happily returns buffers full of silence, and Opus encodes silence to a
+        // couple of kbps, so a silent capture looks healthy everywhere else.
+        AudioLoopback      a;
+        AudioEncoder       ae;
+        std::string        aerr;
+        std::atomic<int>   peak_milli{0};   // peak |sample| * 1000
+        std::atomic<bool>  saw_silent_flag{false};
+
+        auto level_probe = [&](const AudioChunk& c) {
+            if (c.silent) saw_silent_flag.store(true, std::memory_order_relaxed);
+            float peak = 0.0f;
+            const std::size_t n = static_cast<std::size_t>(c.frames) * kAudioChannels;
+            for (std::size_t i = 0; i < n; ++i) peak = std::max(peak, std::fabs(c.samples[i]));
+            const int milli = static_cast<int>(peak * 1000.0f);
+            int prev = peak_milli.load(std::memory_order_relaxed);
+            while (milli > prev &&
+                   !peak_milli.compare_exchange_weak(prev, milli, std::memory_order_relaxed)) {
+            }
+        };
+
+        const bool audio_ok = ae.Open(96000, &aerr) && a.Start(target.pid, level_probe, &aerr);
         if (audio_ok) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(600));
-            std::printf("  audio    : ok (%llu frames in 600 ms)\n",
-                        static_cast<unsigned long long>(a.frames_captured()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            const double peak_db =
+                peak_milli.load() > 0
+                    ? 20.0 * std::log10(static_cast<double>(peak_milli.load()) / 1000.0)
+                    : -120.0;
+            std::printf("  audio    : ok (%llu frames in 1.5 s, peak %.1f dBFS%s)\n",
+                        static_cast<unsigned long long>(a.frames_captured()), peak_db,
+                        saw_silent_flag.load() ? ", SILENT flag seen" : "");
             a.Stop();
+
+            if (peak_milli.load() == 0) {
+                // Ask Windows directly whether the game is making any sound, so
+                // "the game is silent" and "our capture is broken" stop looking
+                // like the same failure.
+                std::printf("             -> captured only silence. What Windows sees:\n");
+                bool found_target = false;
+                for (const auto& ses : EnumerateRenderSessions()) {
+                    if (ses.pid == 0 && ses.peak == 0.0f) continue;  // system session
+                    const bool is_target = ses.pid == target.pid;
+                    if (is_target) found_target = true;
+                    std::printf("                %s%-18s peak %5.3f %-8s on %s\n",
+                                is_target ? "* " : "  ", Narrow(ses.exe).c_str(), ses.peak,
+                                ses.active ? "active" : "inactive",
+                                Narrow(ses.device).c_str());
+                }
+                if (!found_target)
+                    std::printf("                (no audio session for pid %u at all - WoW has\n"
+                                "                 not opened an audio device)\n", target.pid);
+            }
         } else {
             std::printf("  audio    : FAILED - %s\n", aerr.c_str());
         }

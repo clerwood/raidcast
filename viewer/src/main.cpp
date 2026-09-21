@@ -166,8 +166,8 @@ int main(int argc, char** argv) {
 
     std::printf("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
     if (!want_ui)
-        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s\n", "t", "frames", "Mbps", "dec p50",
-                    "drops", "rtt ms", "aud ms");
+        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s %9s\n", "t", "frames", "Mbps", "dec p50",
+                    "drops", "rtt ms", "aud ms", "aud dBFS");
 
     // --- stream -------------------------------------------------------------
     Presenter                 presenter;
@@ -265,17 +265,18 @@ int main(int argc, char** argv) {
             if (audio_ok) {
                 stats.audio_queue_ms  = audio.queued_ms();
                 stats.audio_underruns = audio.underruns();
+                stats.audio_peak_db   = audio.TakePeakDbfs();
             }
             decode_ms.clear();
             last_decoded = decoded;
             last_bytes   = bytes;
 
             if (!want_ui) {
-                std::printf("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u\n",
+                std::printf("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u %9.1f\n",
                             std::chrono::duration<double>(now - start).count(), stats.fps,
                             stats.mbps, stats.decode_p50,
                             static_cast<unsigned long long>(stats.reasm_dropped), stats.rtt_ms,
-                            stats.audio_queue_ms);
+                            stats.audio_queue_ms, stats.audio_peak_db);
             }
         }
 

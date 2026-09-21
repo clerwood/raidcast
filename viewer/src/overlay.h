@@ -28,6 +28,7 @@ struct ViewerStats {
     std::uint64_t dropped_recent = 0;
     std::uint32_t audio_queue_ms = 0;
     std::uint64_t audio_underruns = 0;
+    float         audio_peak_db   = -120.0f;
     bool          audio_ok        = false;
 };
 

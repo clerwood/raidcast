@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace raidcast {
 
@@ -29,6 +30,19 @@ struct AudioChunk {
     std::int64_t  qpc_100ns  = 0;        // same timebase as captured video
     bool          silent     = false;
 };
+
+// One audio session on a render endpoint, as Windows sees it. Used to tell
+// "the game is not making any sound" apart from "our capture is broken" - two
+// failures that look identical from inside the capture.
+struct RenderSession {
+    std::uint32_t pid    = 0;
+    std::wstring  exe;
+    std::wstring  device;
+    float         peak   = 0.0f;  // 0..1, instantaneous
+    bool          active = false;
+};
+
+std::vector<RenderSession> EnumerateRenderSessions();
 
 class AudioLoopback {
 public:

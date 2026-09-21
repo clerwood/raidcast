@@ -87,6 +87,7 @@ says what works, and names anything that does not:
 | `No visible Wow.exe window found` | WoW is in true fullscreen. Switch to `Fullscreen (Windowed)`. |
 | Frame rate drops to 30 while you play | Normal — WoW throttles itself when it is not the focused window. Raise *Max Background FPS* in WoW's options if it bothers you. |
 | `audio unavailable` | Needs Windows 10 2004 or newer. Run `--check` for the specific reason. |
+| Video is fine but there is no sound | Press **Tab** in the viewer. *Audio level* shows what is actually arriving: `silent` means the game is not making sound or the host is not capturing it — run `--check` on the host, which reports the captured level and which programs Windows thinks are playing audio. A dBFS figure means audio is arriving and playing, so check your own volume and output device. |
 | Viewer's host list is empty | The other person is not on your tailnet yet. Invite them from the Tailscale admin console, then press Refresh. |
 | Viewer says `cannot resolve` or `connect ... failed` | The viewer window shows your Tailscale state and what to do about it. Both machines must be signed in and online. |
 | Host says `not on the allowlist` | You started the host with `--allow`, and the caller's Tailscale login isn't listed. |

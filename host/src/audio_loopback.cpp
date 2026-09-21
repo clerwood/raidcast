@@ -1,6 +1,8 @@
 #include "audio_loopback.h"
 
+#include <audiopolicy.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <audioclientactivationparams.h>
 #include <mmdeviceapi.h>
 #include <winrt/base.h>
@@ -67,7 +69,92 @@ private:
     std::atomic<ULONG> refs_{1};
 };
 
+std::wstring ExeOfPid(DWORD pid) {
+    winrt::handle proc{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+    if (!proc) return {};
+    wchar_t path[MAX_PATH] = {};
+    DWORD   len            = MAX_PATH;
+    if (!QueryFullProcessImageNameW(proc.get(), 0, path, &len)) return {};
+    std::wstring full(path, len);
+    const auto slash = full.find_last_of(L'\\');
+    return slash == std::wstring::npos ? full : full.substr(slash + 1);
+}
+
+// PKEY_Device_FriendlyName, declared here rather than including
+// functiondiscoverykeys_devpkey.h, which has include-order requirements that
+// conflict with the rest of this translation unit.
+const PROPERTYKEY kDeviceFriendlyName = {
+    {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+
+std::wstring DeviceName(IMMDevice* dev) {
+    winrt::com_ptr<IPropertyStore> props;
+    if (FAILED(dev->OpenPropertyStore(STGM_READ, props.put()))) return {};
+    PROPVARIANT v{};
+    PropVariantInit(&v);
+    std::wstring name;
+    if (SUCCEEDED(props->GetValue(kDeviceFriendlyName, &v)) && v.vt == VT_LPWSTR)
+        name = v.pwszVal;
+    PropVariantClear(&v);
+    return name;
+}
+
 }  // namespace
+
+std::vector<RenderSession> EnumerateRenderSessions() {
+    std::vector<RenderSession> out;
+
+    winrt::com_ptr<IMMDeviceEnumerator> devices;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                __uuidof(IMMDeviceEnumerator), devices.put_void())))
+        return out;
+
+    // Every active render endpoint, not just the default: a game pointed at a
+    // secondary device would otherwise look silent.
+    winrt::com_ptr<IMMDeviceCollection> collection;
+    if (FAILED(devices->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, collection.put())))
+        return out;
+
+    UINT count = 0;
+    collection->GetCount(&count);
+    for (UINT i = 0; i < count; ++i) {
+        winrt::com_ptr<IMMDevice> dev;
+        if (FAILED(collection->Item(i, dev.put()))) continue;
+        const std::wstring dev_name = DeviceName(dev.get());
+
+        winrt::com_ptr<IAudioSessionManager2> mgr;
+        if (FAILED(dev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                                 mgr.put_void())))
+            continue;
+
+        winrt::com_ptr<IAudioSessionEnumerator> sessions;
+        if (FAILED(mgr->GetSessionEnumerator(sessions.put()))) continue;
+
+        int session_count = 0;
+        sessions->GetCount(&session_count);
+        for (int s = 0; s < session_count; ++s) {
+            winrt::com_ptr<IAudioSessionControl> ctrl;
+            if (FAILED(sessions->GetSession(s, ctrl.put()))) continue;
+
+            auto ctrl2 = ctrl.try_as<IAudioSessionControl2>();
+            if (!ctrl2) continue;
+
+            RenderSession info;
+            DWORD pid = 0;
+            ctrl2->GetProcessId(&pid);
+            info.pid    = pid;
+            info.exe    = ExeOfPid(pid);
+            info.device = dev_name;
+
+            AudioSessionState state{};
+            if (SUCCEEDED(ctrl->GetState(&state))) info.active = state == AudioSessionStateActive;
+
+            if (auto meter = ctrl.try_as<IAudioMeterInformation>()) meter->GetPeakValue(&info.peak);
+
+            out.push_back(std::move(info));
+        }
+    }
+    return out;
+}
 
 struct AudioLoopback::Impl {
     winrt::com_ptr<IAudioClient>        client;

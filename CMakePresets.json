@@ -4,8 +4,6 @@
     {
       "name": "windows",
       "displayName": "Windows x64 (MSVC)",
-      "generator": "Visual Studio 17 2022",
-      "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug;RelWithDebInfo"
@@ -28,20 +26,31 @@
     }
   ],
   "buildPresets": [
-    { "name": "windows", "configurePreset": "windows", "configuration": "RelWithDebInfo" },
-    { "name": "common-only", "configurePreset": "common-only" }
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "common-only",
+      "configurePreset": "common-only"
+    }
   ],
   "testPresets": [
     {
       "name": "windows",
       "configurePreset": "windows",
       "configuration": "RelWithDebInfo",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "common-only",
       "configurePreset": "common-only",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

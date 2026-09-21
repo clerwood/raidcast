@@ -28,6 +28,15 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Without this the release job re-downloads ~30 MB of FFmpeg every run and
+      # is fully exposed to a CDN hiccup. A 504 from GitHub's asset host failed
+      # the v0.0.5 release while the build job, which has this cache, passed.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/windows/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/dependencies.cmake') }}
+
       - name: Configure
         run: cmake --preset windows "-DRAIDCAST_VERSION=${{ steps.ver.outputs.version }}"
 

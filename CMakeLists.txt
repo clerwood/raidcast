@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(raidcast VERSION 0.0.5 LANGUAGES CXX)
+project(raidcast VERSION 1.0.0 LANGUAGES CXX)
 
 # The version the binaries report. The release workflow passes the git tag here,
 # so a published build can never claim a different version than its release.

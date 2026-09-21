@@ -7,8 +7,10 @@ nothing on screen except WoW.
 Built for raid leaders who call mechanics from outside the raid: they need to read
 raid frames, debuff stacks and boss timers as they happen, and hear boss emotes.
 
-> **Beta.** It works and has been tested against a live game, but only between two
-> programs on the same PC so far — not yet across a real network. Expect rough edges.
+> **1.0.** Video and game audio stream end to end and have run over a real
+> Tailscale link between two machines. It is used by a small number of people, so
+> treat unusual hardware as untested territory and send the log if something
+> looks wrong — there is a Copy button for exactly that. Expect rough edges.
 
 ## What gets shared
 

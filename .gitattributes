@@ -1,0 +1,11 @@
+# This repo is edited from both WSL and Windows. Without this, the two gits
+# disagree about line endings and every file looks modified after switching.
+* text=auto eol=lf
+
+# Windows-native tooling that wants CRLF.
+*.iss  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+*.png binary
+*.ico binary

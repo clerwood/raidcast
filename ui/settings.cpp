@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 
@@ -48,6 +49,10 @@ Settings LoadSettings(const std::string& own_version) {
         in >> j;
         if (auto it = j.find("update_channel"); it != j.end() && it->is_string())
             s.update_channel = ChannelFromString(it->get<std::string>(), s.update_channel);
+        if (auto it = j.find("volume"); it != j.end() && it->is_number())
+            s.volume = std::clamp(it->get<float>(), 0.0f, 2.0f);
+        if (auto it = j.find("muted"); it != j.end() && it->is_boolean())
+            s.muted = it->get<bool>();
     } catch (const std::exception&) {
         // A corrupt settings file must not stop the app starting.
     }
@@ -66,7 +71,9 @@ bool SaveSettings(const Settings& s, std::string* error) {
         if (error) *error = "cannot write " + SettingsPath();
         return false;
     }
-    const nlohmann::json j{{"update_channel", ToString(s.update_channel)}};
+    const nlohmann::json j{{"update_channel", ToString(s.update_channel)},
+                           {"volume", s.volume},
+                           {"muted", s.muted}};
     out << j.dump(2) << '\n';
     return out.good();
 }

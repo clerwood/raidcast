@@ -1,6 +1,6 @@
 add_library(raidcast_ui STATIC ui_shell.cpp updater.cpp settings.cpp)
 target_include_directories(raidcast_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(raidcast_ui PUBLIC raidcast_common imgui d3d11 dxgi winhttp shell32
+target_link_libraries(raidcast_ui PUBLIC raidcast_common imgui d3d11 dxgi winhttp shell32 bcrypt
                                   PRIVATE nlohmann_json::nlohmann_json)
 raidcast_enable_cppwinrt(raidcast_ui)
 

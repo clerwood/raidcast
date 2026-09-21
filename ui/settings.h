@@ -20,6 +20,12 @@ UpdateChannel ChannelFromString(const std::string& s, UpdateChannel fallback);
 
 struct Settings {
     UpdateChannel update_channel = UpdateChannel::Stable;
+
+    // Viewer playback gain. Above 1.0 is allowed because game audio mixed down
+    // to a stream is often quieter than the viewer expects; output is clamped so
+    // boosting distorts rather than wrapping.
+    float volume = 1.0f;
+    bool  muted  = false;
 };
 
 // Reads the settings file. When none exists, the channel defaults to Beta for a

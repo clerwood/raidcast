@@ -166,13 +166,17 @@ int main(int argc, char** argv) {
 
     std::printf("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
     if (!want_ui)
-        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s %9s\n", "t", "frames", "Mbps", "dec p50",
-                    "drops", "rtt ms", "aud ms", "aud dBFS");
+        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s %9s %9s\n", "t", "frames", "Mbps", "dec p50",
+                    "drops", "rtt ms", "aud ms", "in dBFS", "out dBFS");
 
     // --- stream -------------------------------------------------------------
     Presenter                 presenter;
     bool                      presenter_ready = false;
     bool                      overlay_visible = true;
+    ViewerControls            controls;
+    controls.volume = settings.volume;
+    controls.muted  = settings.muted;
+    audio.SetGain(controls.muted ? 0.0f : controls.volume);
     Reassembler               reasm;
     std::vector<std::uint8_t> buf(kMaxPayload * 2);
     std::vector<double>       decode_ms;
@@ -190,6 +194,11 @@ int main(int argc, char** argv) {
     for (;;) {
         if (want_ui && !window.Pump()) {
             std::printf("\nwindow closed\n");
+            break;
+        }
+
+        if (updater.quit_requested()) {
+            std::printf("closing so the installer can replace this version\n");
             break;
         }
 
@@ -266,17 +275,18 @@ int main(int argc, char** argv) {
                 stats.audio_queue_ms  = audio.queued_ms();
                 stats.audio_underruns = audio.underruns();
                 stats.audio_peak_db   = audio.TakePeakDbfs();
+                stats.audio_out_db    = audio.TakeOutputPeakDbfs();
             }
             decode_ms.clear();
             last_decoded = decoded;
             last_bytes   = bytes;
 
             if (!want_ui) {
-                std::printf("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u %9.1f\n",
+                std::printf("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u %9.1f %9.1f\n",
                             std::chrono::duration<double>(now - start).count(), stats.fps,
                             stats.mbps, stats.decode_p50,
                             static_cast<unsigned long long>(stats.reasm_dropped), stats.rtt_ms,
-                            stats.audio_queue_ms, stats.audio_peak_db);
+                            stats.audio_queue_ms, stats.audio_peak_db, stats.audio_out_db);
             }
         }
 
@@ -285,7 +295,16 @@ int main(int argc, char** argv) {
         // would put it on garbage.
         if (want_ui && rendered && presenter_ready) {
             shell.NewFrame();
-            DrawViewerOverlay(stats, &overlay_visible);
+            controls.changed = false;
+            DrawViewerOverlay(stats, &overlay_visible, &controls);
+            if (controls.changed) {
+                audio.SetGain(controls.muted ? 0.0f : controls.volume);
+                settings.volume = controls.volume;
+                settings.muted  = controls.muted;
+                std::string serr;
+                if (!SaveSettings(settings, &serr))
+                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+            }
             updater.DrawToast();
             shell.RenderTo(context.get(), presenter.rtv());
             presenter.Swap();

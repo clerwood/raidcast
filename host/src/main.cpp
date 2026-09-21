@@ -58,6 +58,8 @@ struct Options {
     std::vector<std::string> allow;
     // Session-only override of the saved update channel; does not persist.
     std::string channel;
+    // Exercise the whole update path without installing anything.
+    bool update_check = false;
 };
 
 std::wstring Widen(const char* s) {
@@ -115,10 +117,47 @@ int main(int argc, char** argv) {
         else if (a == "--headless") opt.headless = true;
         else if (a == "--allow" && i + 1 < argc) opt.allow.push_back(argv[++i]);
         else if (a == "--channel" && i + 1 < argc) opt.channel = argv[++i];
+        else if (a == "--update-check") opt.update_check = true;
     }
 
     std::printf("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
+
+    // Exercises check, download and checksum verification, then stops short of
+    // running the installer. Needs nothing else initialised.
+    if (opt.update_check) {
+        Settings st = LoadSettings(RAIDCAST_VERSION);
+        if (!opt.channel.empty())
+            st.update_channel = ChannelFromString(opt.channel, st.update_channel);
+        std::printf("channel: %s\n", ToString(st.update_channel));
+
+        Updater up;
+        up.CheckAsync(RAIDCAST_VERSION, st.update_channel);
+        for (int i = 0; i < 100 && up.state() == UpdateState::None; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        if (up.state() != UpdateState::Available) {
+            std::printf("no update offered\n");
+            return 0;
+        }
+        std::printf("found %s, downloading...\n", up.latest_version().c_str());
+        up.StartDownload(/*launch_installer=*/false);
+
+        int last = -1;
+        while (up.state() == UpdateState::Downloading || up.state() == UpdateState::Verifying) {
+            if (up.progress_percent() != last && up.progress_percent() % 25 == 0) {
+                last = up.progress_percent();
+                std::printf("  %d%%\n", last);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (up.state() == UpdateState::Verified) {
+            std::printf("checksum OK -> %s\n", up.downloaded_path().c_str());
+            return 0;
+        }
+        std::printf("FAILED\n");
+        return 1;
+    }
 
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
@@ -156,16 +195,29 @@ int main(int argc, char** argv) {
     if (auto mt = device.try_as<ID3D11Multithread>()) mt->SetMultithreadProtected(TRUE);
 
     // --- encoder ------------------------------------------------------------
+    // NV12 stores chroma at half resolution, so odd dimensions have no
+    // representation. Round down once, here, and use the same numbers for the
+    // converter and the encoder: the two disagreeing meant any window with an odd
+    // width or height failed to start with "no usable NV12 frame pool
+    // configuration". WoW at 2560x1440 is even, which is why it never showed.
+    const std::uint32_t enc_w = target.width & ~1u;
+    const std::uint32_t enc_h = target.height & ~1u;
+    if (enc_w == 0 || enc_h == 0) {
+        std::fprintf(stderr, "target window is too small to encode (%ux%u)\n", target.width,
+                     target.height);
+        return 1;
+    }
+
     Bgra2Nv12     conv;
     Encoder       enc;
     EncoderConfig ecfg;
-    ecfg.width       = target.width;
-    ecfg.height      = target.height;
+    ecfg.width       = enc_w;
+    ecfg.height      = enc_h;
     ecfg.fps         = 60;
     ecfg.bitrate_bps = opt.bitrate;
 
     std::string err;
-    if (!conv.Init(device.get(), target.width, target.height, &err)) {
+    if (!conv.Init(device.get(), enc_w, enc_h, &err)) {
         std::fprintf(stderr, "colour conversion init failed: %s\n", err.c_str());
         return 1;
     }
@@ -297,7 +349,7 @@ int main(int argc, char** argv) {
 
     const bool want_ui = !opt.headless;
     HostPanel  panel;
-    if (want_ui && !panel.Init(device.get(), context.get(), target.width, target.height, &err)) {
+    if (want_ui && !panel.Init(device.get(), context.get(), enc_w, enc_h, &err)) {
         std::fprintf(stderr, "panel init failed: %s\n", err.c_str());
         return 1;
     }
@@ -423,8 +475,8 @@ int main(int argc, char** argv) {
     HostStatus status;
     status.target           = Narrow(target.exe);
     status.codec            = enc.codec_name();
-    status.width            = target.width;
-    status.height           = target.height;
+    status.width            = enc_w;
+    status.height           = enc_h;
     status.bitrate_cap_mbps = opt.bitrate / 1000000;
     status.srt_latency_ms   = opt.latency;
 
@@ -468,10 +520,15 @@ int main(int argc, char** argv) {
         if (want_ui && !window.Pump()) break;
 
         // Also reported on the console, so a headless run and the logs show it.
-        if (!update_announced && updater.update_available()) {
+        if (!update_announced && updater.state() == UpdateState::Available) {
             update_announced = true;
             std::printf("update available: %s (channel: %s)\n",
                         updater.latest_version().c_str(), ToString(settings.update_channel));
+        }
+        // The installer cannot replace an executable that is still running.
+        if (updater.quit_requested()) {
+            std::printf("closing so the installer can replace this version\n");
+            break;
         }
 
         if (!connected.load(std::memory_order_acquire) && !capture.closed()) {

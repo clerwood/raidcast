@@ -27,12 +27,22 @@ public:
     // Decodes one Opus packet and queues the result for playback.
     bool Push(const std::uint8_t* data, std::size_t len, std::string* error = nullptr);
 
+    // Applied in the render thread, so a change takes effect immediately rather
+    // than after the queued audio drains.
+    void SetGain(float gain);
+
     std::uint32_t queued_ms() const;
 
     // Peak level of decoded audio since the last call, in dBFS (-120 = silence).
     // Distinguishes "no audio arriving" from "audio arriving but silent" from
     // "playing fine" - three states that are otherwise indistinguishable.
     float TakePeakDbfs();
+
+    // Peak of what was actually written to the audio device since the last call,
+    // i.e. after gain and mute. TakePeakDbfs() is the level arriving; this is the
+    // level leaving. Both matter: arriving-but-muted and not-arriving look the
+    // same on one meter alone.
+    float TakeOutputPeakDbfs();
     std::uint64_t underruns() const;
     std::uint64_t trimmed() const;
 

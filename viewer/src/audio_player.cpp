@@ -68,6 +68,8 @@ struct AudioPlayer::Impl {
     std::vector<float> queue;  // interleaved, device format
     std::atomic<std::uint64_t> underruns{0};
     std::atomic<int>           peak_milli{0};  // peak |sample| * 1000
+    std::atomic<float>         gain{1.0f};
+    std::atomic<int>           out_peak_milli{0};
     std::atomic<std::uint64_t> trimmed{0};
 
     std::size_t QueuedFrames() const { return queue.size() / dst_channels; }
@@ -85,6 +87,16 @@ std::uint32_t AudioPlayer::queued_ms() const {
 // rebuild happens once.
 static bool EnsureResampler(AudioPlayer::Impl* impl, const AVFrame* frame,
                             std::string* error);
+
+void AudioPlayer::SetGain(float gain) {
+    impl_->gain.store(std::clamp(gain, 0.0f, 4.0f), std::memory_order_relaxed);
+}
+
+float AudioPlayer::TakeOutputPeakDbfs() {
+    const int milli = impl_->out_peak_milli.exchange(0, std::memory_order_relaxed);
+    if (milli <= 0) return -120.0f;
+    return 20.0f * std::log10(static_cast<float>(milli) / 1000.0f);
+}
 
 float AudioPlayer::TakePeakDbfs() {
     const int milli = impl_->peak_milli.exchange(0, std::memory_order_relaxed);
@@ -188,8 +200,19 @@ bool AudioPlayer::Open(std::string* error) {
                 written = static_cast<UINT32>(std::min<std::size_t>(have, want));
                 if (written > 0) {
                     const std::size_t n = static_cast<std::size_t>(written) * impl_->dst_channels;
-                    std::copy(impl_->queue.begin(), impl_->queue.begin() + n,
-                              reinterpret_cast<float*>(out));
+                    const float g  = impl_->gain.load(std::memory_order_relaxed);
+                    auto*       dst = reinterpret_cast<float*>(out);
+                    float out_peak = 0.0f;
+                    for (std::size_t i = 0; i < n; ++i) {
+                        // Clamp rather than let a boosted sample wrap into noise.
+                        dst[i]   = std::clamp(impl_->queue[i] * g, -1.0f, 1.0f);
+                        out_peak = std::max(out_peak, std::fabs(dst[i]));
+                    }
+                    const int om = static_cast<int>(out_peak * 1000.0f);
+                    int prev_om = impl_->out_peak_milli.load(std::memory_order_relaxed);
+                    while (om > prev_om && !impl_->out_peak_milli.compare_exchange_weak(
+                                               prev_om, om, std::memory_order_relaxed)) {
+                    }
                     impl_->queue.erase(impl_->queue.begin(),
                                        impl_->queue.begin() + static_cast<std::ptrdiff_t>(n));
                 }

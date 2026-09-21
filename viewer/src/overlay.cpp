@@ -20,8 +20,32 @@ void Row(const char* label, const char* fmt, ...) {
 
 }  // namespace
 
-void DrawViewerOverlay(const ViewerStats& s, bool* visible) {
+void DrawViewerOverlay(const ViewerStats& s, bool* visible, ViewerControls* controls) {
     if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) *visible = !*visible;
+    // Volume is reachable without opening the stats panel: it is a control, not a
+    // diagnostic, and wanting it quieter mid-pull is not a debugging session.
+    const ImGuiViewport* vol_vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vol_vp->WorkPos.x + vol_vp->WorkSize.x - 8,
+                                   vol_vp->WorkPos.y + 8),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##volume", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+    if (ImGui::Button(controls->muted ? "Unmute" : "Mute", ImVec2(64, 0))) {
+        controls->muted  = !controls->muted;
+        controls->changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(controls->muted);
+    ImGui::SetNextItemWidth(130.0f);
+    if (ImGui::SliderFloat("##vol", &controls->volume, 0.0f, 2.0f, "%.2fx",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+        controls->changed = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::End();
+
     if (!*visible) {
         // Always leave a hint: a viewer who cannot find the diagnostics has no
         // diagnostics.
@@ -57,10 +81,12 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible) {
         Row("Bad packets", "%llu", static_cast<unsigned long long>(s.packets_bad));
         if (s.audio_ok) {
             Row("Audio queue", "%u ms", s.audio_queue_ms);
-            Row("Audio level", "%s", s.audio_peak_db <= -119.0f
-                                         ? "silent"
-                                         : (std::to_string(static_cast<int>(s.audio_peak_db)) +
-                                            " dBFS").c_str());
+            const auto level = [](float db) {
+                return db <= -119.0f ? std::string("silent")
+                                     : std::to_string(static_cast<int>(db)) + " dBFS";
+            };
+            Row("Audio in", "%s", level(s.audio_peak_db).c_str());
+            Row("Audio out", "%s", level(s.audio_out_db).c_str());
             Row("Audio underruns", "%llu", static_cast<unsigned long long>(s.audio_underruns));
         } else {
             Row("Audio", "unavailable");

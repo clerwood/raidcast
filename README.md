@@ -69,6 +69,10 @@ rather than after the picture goes bad.
 If their machine isn't listed yet, press **Refresh**. You can also type an address
 or machine name directly.
 
+Volume and mute sit in the top-right of the viewer window. Both stick between
+sessions. You can go above 100% if the game audio comes through quieter than you
+want; it clamps rather than distorting into noise.
+
 Press **Tab** once connected to show or hide connection stats.
 
 ### Before a raid night
@@ -121,7 +125,18 @@ RaidCast is pre-1.0 every release is a beta, so a fresh install defaults to
 sticks, in `%APPDATA%\RaidCast\settings.json`.
 
 `--channel stable` or `--channel beta` overrides it for one run without changing
-the saved setting. If you are inviting someone to your tailnet just
+the saved setting.
+
+When an update is found, **Update now** downloads the installer, checks it against
+the SHA-256 checksum GitHub publishes for it, and runs it. RaidCast then closes,
+because the installer cannot replace a program that is still running. If the
+checksum does not match, the download is deleted and nothing is run.
+
+To check the whole update path without installing anything:
+
+```
+raidcast-host.exe --update-check
+``` If you are inviting someone to your tailnet just
 for this, [docs/SECURITY.md](docs/SECURITY.md) covers locking their access down to
 RaidCast alone.
 

@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # common/ is dependency-free by design, so the wire protocol gets checked in
+  # seconds on every push without waiting on a Windows runner or an FFmpeg
+  # download. If this job is red, nothing else matters.
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset common-only
+      - name: Build
+        run: cmake --build --preset common-only
+      - name: Test
+        run: ctest --preset common-only
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/windows/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/dependencies.cmake') }}
+
+      - name: Configure
+        run: cmake --preset windows
+
+      - name: Build
+        run: cmake --build --preset windows
+
+      - name: Test
+        run: ctest --preset windows
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: raidcast-windows-x64
+          path: build/windows/*/RelWithDebInfo/
+          if-no-files-found: error

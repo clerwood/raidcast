@@ -1,0 +1,38 @@
+# Capture is its own library so the M1 probe and the real host share exactly one
+# implementation — the spike produces production code, not a throwaway.
+add_library(raidcast_capture STATIC
+    src/capture_wgc.cpp
+    src/convert_nv12.cpp
+    # TODO: audio_loopback.cpp — WASAPI process loopback on Wow.exe (D4)
+)
+
+target_include_directories(raidcast_capture PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(raidcast_capture PUBLIC
+    raidcast_common
+    d3d11
+    dxgi
+    dwmapi
+    d3dcompiler
+    windowsapp     # Windows.Graphics.Capture
+)
+raidcast_enable_cppwinrt(raidcast_capture)
+
+add_executable(raidcast-host
+    src/main.cpp
+    # TODO: encoder.cpp — libav hevc_nvenc / hevc_amf / hevc_qsv (D5)
+    # TODO: sender.cpp  — Packetize() -> SRT listener             (D8)
+    # TODO: ui.cpp      — ImGui panel: preview, status, kill      (D14, §7)
+)
+
+target_link_libraries(raidcast-host PRIVATE
+    raidcast_capture
+    srt_static
+    imgui
+    ffmpeg
+    mmdevapi       # WASAPI
+)
+
+raidcast_stage_runtime(raidcast-host)
+
+install(TARGETS raidcast-host RUNTIME DESTINATION .)
+install(FILES ${RAIDCAST_FFMPEG_DLLS} DESTINATION .)

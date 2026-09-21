@@ -1,0 +1,21 @@
+# Design docs and scratch notes — deliberately untracked.
+.local/
+
+# Build output
+build/
+out/
+_deps/
+*.user
+
+# Editors / tooling
+.vs/
+.idea/
+.vscode/
+.cache/
+compile_commands.json
+
+# Dependency payloads fetched at configure time
+third_party/ffmpeg/
+
+# Installer output
+installer/Output/

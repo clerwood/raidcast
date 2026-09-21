@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
     // WASAPI and the D3D11VA device both need COM on this thread.
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
-    std::string   host    = "127.0.0.1";
+    std::string   host;
     std::uint16_t port    = 41800;
     int           latency = 60;
     int           seconds = 0;
@@ -56,6 +56,24 @@ int main(int argc, char** argv) {
 
     std::printf("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
+
+    // Launched from a Start Menu shortcut there are no arguments, so ask rather
+    // than failing against a default nobody meant.
+    if (host.empty()) {
+        std::printf("\nEnter the host's Tailscale address or machine name\n"
+                    "(the 100.x.y.z shown by the Tailscale tray icon): ");
+        std::fflush(stdout);
+        char line[256] = {};
+        if (!std::fgets(line, sizeof(line), stdin)) return 1;
+        host = line;
+        while (!host.empty() && (host.back() == '\n' || host.back() == '\r' ||
+                                 host.back() == ' ' || host.back() == '\t'))
+            host.pop_back();
+        if (host.empty()) {
+            std::fprintf(stderr, "No address given.\n");
+            return 1;
+        }
+    }
 
     winrt::com_ptr<ID3D11Device>        device;
     winrt::com_ptr<ID3D11DeviceContext> context;

@@ -7,9 +7,8 @@ nothing on screen except WoW.
 Built for raid leaders who call mechanics from outside the raid: they need to read
 raid frames, debuff stacks and boss timers as they happen, and hear boss emotes.
 
-> **Beta.** It works and it has been tested against a live game, but only between
-> two programs on the same PC so far — not yet across a real network. Expect rough
-> edges. The viewer is still started from a command line.
+> **Beta.** It works and has been tested against a live game, but only between two
+> programs on the same PC so far — not yet across a real network. Expect rough edges.
 
 ## What gets shared
 
@@ -45,6 +44,9 @@ code-signed yet. Click **More info → Run anyway**.
 
 There is also a portable `.zip` if you would rather not install anything.
 
+By default it installs for just you, to `%LOCALAPPDATA%\Programs\RaidCast`, and
+needs no administrator rights.
+
 ## Using it
 
 ### Sharing your game
@@ -59,24 +61,18 @@ The window shows `Waiting for viewer...` until someone connects, then live stats
 
 ### Watching someone's game
 
-Open a terminal and run:
-
-```
-"C:\Program Files\RaidCast\raidcast-viewer.exe" --host 100.x.y.z
-```
-
-Use the host's Tailscale IP. Type the numeric address rather than a machine name —
-names are not supported yet.
+Open **RaidCast Viewer**. It asks for the host's address — paste the `100.x.y.z`
+from their Tailscale tray icon, or type their Tailscale machine name.
 
 Press **Tab** in the viewer window to show or hide connection stats.
 
 ### Before a raid night
 
-On the host, this checks that everything a session needs actually works, and tells
-you what is broken if not:
+Worth running once on the host machine. It starts capture, audio and the encoder,
+says what works, and names anything that does not:
 
 ```
-"C:\Program Files\RaidCast\raidcast-host.exe" --check
+%LOCALAPPDATA%\Programs\RaidCast\raidcast-host.exe --check
 ```
 
 ## If something goes wrong
@@ -86,7 +82,7 @@ you what is broken if not:
 | `No visible Wow.exe window found` | WoW is in true fullscreen. Switch to `Fullscreen (Windowed)`. |
 | Frame rate drops to 30 while you play | Normal — WoW throttles itself when it is not the focused window. Raise *Max Background FPS* in WoW's options if it bothers you. |
 | `audio unavailable` | Needs Windows 10 2004 or newer. Run `--check` for the specific reason. |
-| Viewer says `connect ... failed` | Check `tailscale status` on both machines. Both must be signed in and online. |
+| Viewer says `cannot resolve` or `connect ... failed` | Check `tailscale status` on both machines. Both must be signed in and online. |
 | Stream is choppy or blurry | Confirm Tailscale connected you **directly**. Run `tailscale status` on the host: a `relay` connection instead of `direct` cannot carry video. Forwarding UDP port 41641 to the host usually fixes it. |
 | `host protocol vN, viewer vM` | The two machines are on different RaidCast versions. Update both. |
 

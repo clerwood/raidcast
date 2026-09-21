@@ -381,6 +381,9 @@ int main(int argc, char** argv) {
                 status.peer = (parsed->user.empty() ? std::string("unknown") : parsed->user) +
                               " (" + peer_addr + ")";
                 connected.store(true, std::memory_order_release);
+                // Without this the viewer receives a perfectly healthy stream it
+                // cannot decode until the next safety IDR, up to ten seconds away.
+                enc.RequestKeyframe();
                 std::printf("viewer connected: %s\n", status.peer.c_str());
                 // TODO(M2): `tailscale whois` the peer and check the allowlist (D10).
             }

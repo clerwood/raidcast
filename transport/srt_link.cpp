@@ -8,6 +8,8 @@
 #include <ws2tcpip.h>
 
 #include <chrono>
+#include <cstring>
+#include <string>
 #include <thread>
 
 namespace raidcast {
@@ -164,14 +166,23 @@ bool SrtLink::Connect(const std::string& host, std::uint16_t port, int latency_m
                         static_cast<int>(stream_id.size()));
     }
 
-    sockaddr_in sa{};
-    sa.sin_family = AF_INET;
-    sa.sin_port   = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &sa.sin_addr) != 1) {
-        if (error) *error = "not a valid IPv4 address: " + host;
+    // Resolve rather than parse, so a Tailscale MagicDNS name works as well as a
+    // 100.x.y.z address. Nobody should have to read an IP over voice chat.
+    addrinfo  hints{};
+    hints.ai_family   = AF_INET;   // SRT here is IPv4; tailnet v4 is always present
+    hints.ai_socktype = SOCK_DGRAM;
+
+    addrinfo*         resolved = nullptr;
+    const std::string port_str = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &resolved) != 0 || !resolved) {
+        if (error) *error = "cannot resolve \"" + host + "\" - check the name or use the 100.x.y.z address";
         Close();
         return false;
     }
+
+    sockaddr_in sa{};
+    std::memcpy(&sa, resolved->ai_addr, sizeof(sa));
+    freeaddrinfo(resolved);
 
     if (srt_connect(sock_, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == SRT_ERROR) {
         if (error) *error = std::string("srt_connect: ") + LastErr();

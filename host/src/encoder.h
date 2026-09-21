@@ -60,6 +60,12 @@ public:
     // Submits the frame written by BeginFrame and drains any ready packets.
     bool EndFrame(std::int64_t pts_us, const PacketSink& sink, std::string* error = nullptr);
 
+    // Forces the next frame to be an IDR. Call this when a viewer connects: with
+    // an infinite GOP there is otherwise no decodable entry point until the slow
+    // safety keyframe, so a viewer joining mid-session receives a healthy stream
+    // it cannot decode. Thread-safe.
+    void RequestKeyframe();
+
     const char* codec_name() const;
 
     // False when the driver refused a UAV-capable frame pool and the shader

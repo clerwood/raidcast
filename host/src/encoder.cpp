@@ -10,6 +10,7 @@ extern "C" {
 #include <winrt/base.h>
 
 #include <array>
+#include <atomic>
 #include <climits>
 
 namespace raidcast {
@@ -47,7 +48,12 @@ struct Encoder::Impl {
     ID3D11Texture2D* pool_tex   = nullptr;    // current frame's pool texture
     std::uint32_t    pool_slice = 0;
     bool             direct     = true;
+    std::atomic<bool> want_idr{false};
 };
+
+void Encoder::RequestKeyframe() {
+    if (impl_) impl_->want_idr.store(true, std::memory_order_release);
+}
 
 bool Encoder::direct_write() const { return impl_ && impl_->direct; }
 
@@ -208,6 +214,9 @@ bool Encoder::Open(ID3D11Device* device, ID3D11DeviceContext* context,
             opt("zerolatency", "1");
             opt("delay", "0");
             opt("b_ref_mode", "disabled");
+            // forced-idr makes an explicitly requested I-frame a true IDR rather
+            // than a plain I-frame a decoder still cannot start from.
+            opt("forced-idr", "1");
             if (cfg.intra_refresh) {
                 opt("intra-refresh", "1");
                 opt("int_ref_type", "vertical");
@@ -277,6 +286,11 @@ bool Encoder::EndFrame(std::int64_t pts_us, const PacketSink& sink, std::string*
         impl_->context->CopySubresourceRegion(impl_->pool_tex, impl_->pool_slice, 0, 0, 0,
                                               impl_->scratch.get(), 0, nullptr);
     }
+
+    if (impl_->want_idr.exchange(false, std::memory_order_acq_rel))
+        impl_->frame->pict_type = AV_PICTURE_TYPE_I;
+    else
+        impl_->frame->pict_type = AV_PICTURE_TYPE_NONE;
 
     impl_->frame->pts = pts_us;
     if (int err = avcodec_send_frame(impl_->ctx, impl_->frame); err < 0) {

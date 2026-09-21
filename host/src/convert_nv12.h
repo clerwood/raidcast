@@ -1,8 +1,8 @@
 // BGRA -> NV12 colour conversion on the GPU.
 //
 // The captured frame never leaves VRAM: WGC hands us a BGRA texture, a compute
-// shader writes NV12 planes, and the encoder consumes those directly
-// (.local/DESIGN.md §6).
+// shader writes both NV12 planes, and the encoder consumes that texture
+// directly (.local/DESIGN.md §6).
 //
 // Colour: BT.709, **full range**. We control both ends of this link, and screen
 // content is the one case where limited range's lost code levels are actually
@@ -15,7 +15,9 @@
 #include <winrt/base.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 
 namespace raidcast {
 
@@ -24,28 +26,37 @@ public:
     bool Init(ID3D11Device* device, std::uint32_t width, std::uint32_t height,
               std::string* error = nullptr);
 
-    // Converts into the internally-owned Y and UV planes.
+    // Converts into the internally-owned NV12 texture.
     bool Convert(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra);
 
-    // Y is R8_UNORM at full resolution; UV is R8G8_UNORM at half resolution.
-    ID3D11Texture2D* y_plane()  const { return y_.get(); }
-    ID3D11Texture2D* uv_plane() const { return uv_.get(); }
+    // Converts straight into a caller-owned NV12 texture — used to write into
+    // the encoder's hardware frame pool with no intermediate copy. `slice`
+    // selects the array element, since those pools are texture arrays.
+    bool ConvertInto(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra,
+                     ID3D11Texture2D* nv12, std::uint32_t slice);
 
-    std::uint32_t width()  const { return w_; }
-    std::uint32_t height() const { return h_; }
+    ID3D11Texture2D* nv12()   const { return nv12_.get(); }
+    std::uint32_t    width()  const { return w_; }
+    std::uint32_t    height() const { return h_; }
 
-    // Reads both planes back and writes a raw NV12 frame (Y plane followed by
-    // interleaved UV). Slow — diagnostics only, never on the streaming path.
+    // Reads the owned texture back and writes a raw NV12 frame. Slow —
+    // diagnostics only, never on the streaming path.
     bool DumpNv12(ID3D11DeviceContext* ctx, const char* path, std::string* error = nullptr);
 
 private:
-    winrt::com_ptr<ID3D11ComputeShader>       cs_;
-    winrt::com_ptr<ID3D11Texture2D>           y_, uv_;
-    winrt::com_ptr<ID3D11UnorderedAccessView> y_uav_, uv_uav_;
-    winrt::com_ptr<ID3D11Texture2D>           y_stage_, uv_stage_;
-    winrt::com_ptr<ID3D11Buffer>              cb_;
-    winrt::com_ptr<ID3D11Device>              device_;
-    std::uint32_t                             w_ = 0, h_ = 0;
+    using UavPair = std::pair<winrt::com_ptr<ID3D11UnorderedAccessView>,
+                              winrt::com_ptr<ID3D11UnorderedAccessView>>;
+
+    // Plane views are cached per (texture, slice): the encoder cycles through a
+    // small fixed pool, so this converges after the first few frames.
+    UavPair* PlaneViews(ID3D11Texture2D* nv12, std::uint32_t slice);
+
+    winrt::com_ptr<ID3D11ComputeShader> cs_;
+    winrt::com_ptr<ID3D11Texture2D>     nv12_, stage_;
+    winrt::com_ptr<ID3D11Buffer>        cb_;
+    winrt::com_ptr<ID3D11Device>        device_;
+    std::map<std::pair<ID3D11Texture2D*, std::uint32_t>, UavPair> uavs_;
+    std::uint32_t                       w_ = 0, h_ = 0;
 };
 
 }  // namespace raidcast

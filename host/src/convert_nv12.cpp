@@ -9,8 +9,8 @@ namespace raidcast {
 namespace {
 
 // TODO(perf): precompile with fxc at build time and embed the bytecode. Runtime
-// D3DCompile costs ~10 ms once at startup, which is fine for now but is a
-// needless dependency on d3dcompiler_47.dll.
+// D3DCompile costs ~10 ms once at startup, which is fine but is a needless
+// runtime dependency on d3dcompiler_47.dll.
 constexpr char kShader[] = R"HLSL(
 Texture2D<float4>   src   : register(t0);
 RWTexture2D<float>  dstY  : register(u0);
@@ -46,19 +46,17 @@ void main(uint3 tid : SV_DispatchThreadID)
 }
 )HLSL";
 
-bool MakeTex(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT fmt, UINT bind,
-             D3D11_USAGE usage, UINT cpu, ID3D11Texture2D** out) {
-    D3D11_TEXTURE2D_DESC d{};
-    d.Width          = w;
-    d.Height         = h;
-    d.MipLevels      = 1;
-    d.ArraySize      = 1;
-    d.Format         = fmt;
-    d.SampleDesc     = {1, 0};
-    d.Usage          = usage;
-    d.BindFlags      = bind;
-    d.CPUAccessFlags = cpu;
-    return SUCCEEDED(dev->CreateTexture2D(&d, nullptr, out));
+bool MakeUav(ID3D11Device* dev, ID3D11Texture2D* tex, DXGI_FORMAT fmt,
+             std::uint32_t slice, ID3D11UnorderedAccessView** out) {
+    // NV12 plane selection in D3D11 is by view format, not a plane index:
+    // R8_UNORM addresses Y, R8G8_UNORM addresses the interleaved UV plane.
+    D3D11_UNORDERED_ACCESS_VIEW_DESC d{};
+    d.Format                         = fmt;
+    d.ViewDimension                  = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+    d.Texture2DArray.MipSlice        = 0;
+    d.Texture2DArray.FirstArraySlice = slice;
+    d.Texture2DArray.ArraySize       = 1;
+    return SUCCEEDED(dev->CreateUnorderedAccessView(tex, &d, out));
 }
 
 }  // namespace
@@ -85,43 +83,60 @@ bool Bgra2Nv12::Init(ID3D11Device* device, std::uint32_t width, std::uint32_t he
         return false;
     }
     if (FAILED(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(),
-                                           nullptr, cs_.put()))) {
+                                           nullptr, cs_.put())))
         return fail("CreateComputeShader failed");
-    }
 
-    if (!MakeTex(device, w_, h_, DXGI_FORMAT_R8_UNORM,
-                 D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
-                 D3D11_USAGE_DEFAULT, 0, y_.put()))
-        return fail("Y plane allocation failed");
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width      = w_;
+    d.Height     = h_;
+    d.MipLevels  = 1;
+    d.ArraySize  = 1;
+    d.Format     = DXGI_FORMAT_NV12;
+    d.SampleDesc = {1, 0};
+    d.Usage      = D3D11_USAGE_DEFAULT;
+    d.BindFlags  = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device->CreateTexture2D(&d, nullptr, nv12_.put())))
+        return fail("NV12 texture allocation failed (BIND_UNORDERED_ACCESS unsupported?)");
 
-    if (!MakeTex(device, w_ / 2, h_ / 2, DXGI_FORMAT_R8G8_UNORM,
-                 D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
-                 D3D11_USAGE_DEFAULT, 0, uv_.put()))
-        return fail("UV plane allocation failed");
-
-    if (FAILED(device->CreateUnorderedAccessView(y_.get(), nullptr, y_uav_.put())) ||
-        FAILED(device->CreateUnorderedAccessView(uv_.get(), nullptr, uv_uav_.put())))
-        return fail("UAV creation failed — typed UAV stores unsupported for R8/R8G8?");
+    if (!PlaneViews(nv12_.get(), 0))
+        return fail("NV12 plane UAVs unsupported — typed UAV stores on R8/R8G8 unavailable");
 
     struct Params { std::uint32_t w, h, p0, p1; } params{w_, h_, 0, 0};
     D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth      = sizeof(Params);
-    bd.Usage          = D3D11_USAGE_IMMUTABLE;
-    bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    bd.ByteWidth = sizeof(Params);
+    bd.Usage     = D3D11_USAGE_IMMUTABLE;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA init{&params, 0, 0};
     if (FAILED(device->CreateBuffer(&bd, &init, cb_.put()))) return fail("cbuffer failed");
 
     return true;
 }
 
-bool Bgra2Nv12::Convert(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra) {
-    if (!cs_ || bgra == nullptr) return false;
+Bgra2Nv12::UavPair* Bgra2Nv12::PlaneViews(ID3D11Texture2D* nv12, std::uint32_t slice) {
+    const auto key = std::make_pair(nv12, slice);
+    auto it = uavs_.find(key);
+    if (it != uavs_.end()) return &it->second;
+
+    UavPair pair;
+    if (!MakeUav(device_.get(), nv12, DXGI_FORMAT_R8_UNORM, slice, pair.first.put()) ||
+        !MakeUav(device_.get(), nv12, DXGI_FORMAT_R8G8_UNORM, slice, pair.second.put()))
+        return nullptr;
+
+    return &uavs_.emplace(key, std::move(pair)).first->second;
+}
+
+bool Bgra2Nv12::ConvertInto(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra,
+                            ID3D11Texture2D* nv12, std::uint32_t slice) {
+    if (!cs_ || bgra == nullptr || nv12 == nullptr) return false;
+
+    UavPair* planes = PlaneViews(nv12, slice);
+    if (!planes) return false;
 
     winrt::com_ptr<ID3D11ShaderResourceView> srv;
     if (FAILED(device_->CreateShaderResourceView(bgra, nullptr, srv.put()))) return false;
 
     ID3D11ShaderResourceView*  srvs[] = {srv.get()};
-    ID3D11UnorderedAccessView* uavs[] = {y_uav_.get(), uv_uav_.get()};
+    ID3D11UnorderedAccessView* uavs[] = {planes->first.get(), planes->second.get()};
     ID3D11Buffer*              cbs[]  = {cb_.get()};
 
     ctx->CSSetShader(cs_.get(), nullptr, 0);
@@ -130,12 +145,16 @@ bool Bgra2Nv12::Convert(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra) {
     ctx->CSSetConstantBuffers(0, 1, cbs);
     ctx->Dispatch((w_ / 2 + 7) / 8, (h_ / 2 + 7) / 8, 1);
 
-    // Unbind so the textures can be read by the encoder next.
+    // Unbind so the encoder can read the texture next.
     ID3D11ShaderResourceView*  no_srv[] = {nullptr};
     ID3D11UnorderedAccessView* no_uav[] = {nullptr, nullptr};
     ctx->CSSetShaderResources(0, 1, no_srv);
     ctx->CSSetUnorderedAccessViews(0, 2, no_uav, nullptr);
     return true;
+}
+
+bool Bgra2Nv12::Convert(ID3D11DeviceContext* ctx, ID3D11Texture2D* bgra) {
+    return ConvertInto(ctx, bgra, nv12_.get(), 0);
 }
 
 bool Bgra2Nv12::DumpNv12(ID3D11DeviceContext* ctx, const char* path, std::string* error) {
@@ -144,33 +163,41 @@ bool Bgra2Nv12::DumpNv12(ID3D11DeviceContext* ctx, const char* path, std::string
         return false;
     };
 
-    if (!y_stage_ &&
-        !MakeTex(device_.get(), w_, h_, DXGI_FORMAT_R8_UNORM, 0, D3D11_USAGE_STAGING,
-                 D3D11_CPU_ACCESS_READ, y_stage_.put()))
-        return fail("Y staging allocation failed");
-    if (!uv_stage_ &&
-        !MakeTex(device_.get(), w_ / 2, h_ / 2, DXGI_FORMAT_R8G8_UNORM, 0,
-                 D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, uv_stage_.put()))
-        return fail("UV staging allocation failed");
+    if (!stage_) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width          = w_;
+        d.Height         = h_;
+        d.MipLevels      = 1;
+        d.ArraySize      = 1;
+        d.Format         = DXGI_FORMAT_NV12;
+        d.SampleDesc     = {1, 0};
+        d.Usage          = D3D11_USAGE_STAGING;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device_->CreateTexture2D(&d, nullptr, stage_.put())))
+            return fail("NV12 staging allocation failed");
+    }
 
-    ctx->CopyResource(y_stage_.get(), y_.get());
-    ctx->CopyResource(uv_stage_.get(), uv_.get());
-
-    FILE* f = std::fopen(path, "wb");
-    if (!f) return fail("cannot open output file");
+    ctx->CopyResource(stage_.get(), nv12_.get());
 
     D3D11_MAPPED_SUBRESOURCE m{};
-    if (SUCCEEDED(ctx->Map(y_stage_.get(), 0, D3D11_MAP_READ, 0, &m))) {
-        for (std::uint32_t y = 0; y < h_; ++y)
-            std::fwrite(static_cast<const std::uint8_t*>(m.pData) + y * m.RowPitch, 1, w_, f);
-        ctx->Unmap(y_stage_.get(), 0);
+    if (FAILED(ctx->Map(stage_.get(), 0, D3D11_MAP_READ, 0, &m))) return fail("Map failed");
+
+    FILE* f = std::fopen(path, "wb");
+    if (!f) {
+        ctx->Unmap(stage_.get(), 0);
+        return fail("cannot open output file");
     }
-    if (SUCCEEDED(ctx->Map(uv_stage_.get(), 0, D3D11_MAP_READ, 0, &m))) {
-        for (std::uint32_t y = 0; y < h_ / 2; ++y)
-            std::fwrite(static_cast<const std::uint8_t*>(m.pData) + y * m.RowPitch, 1, w_, f);
-        ctx->Unmap(uv_stage_.get(), 0);
-    }
+
+    // D3D11 NV12 layout: Y rows first, then the UV plane at RowPitch * Height.
+    const auto* base = static_cast<const std::uint8_t*>(m.pData);
+    for (std::uint32_t y = 0; y < h_; ++y)
+        std::fwrite(base + static_cast<std::size_t>(y) * m.RowPitch, 1, w_, f);
+    const auto* uv = base + static_cast<std::size_t>(m.RowPitch) * h_;
+    for (std::uint32_t y = 0; y < h_ / 2; ++y)
+        std::fwrite(uv + static_cast<std::size_t>(y) * m.RowPitch, 1, w_, f);
+
     std::fclose(f);
+    ctx->Unmap(stage_.get(), 0);
     return true;
 }
 

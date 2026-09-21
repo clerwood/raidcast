@@ -14,9 +14,10 @@
 
 #include "capture_wgc.h"
 #include "convert_nv12.h"
+#include "encoder.h"
 
 #include <winrt/base.h>
-#include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 
 #include <algorithm>
@@ -34,10 +35,13 @@ namespace {
 
 struct Options {
     bool         list       = false;
+    bool         probe_tex  = true == false;
     bool         preview    = true;
     int          seconds    = 15;
     int          delay      = 0;  // grace period to focus the target first
     std::string  dump;        // write one converted NV12 frame here, then continue
+    std::string  encode;      // encode the stream to this raw bitstream file
+    std::uint32_t bitrate    = 25'000'000;
     std::wstring process    = L"Wow.exe";
     HWND         hwnd       = nullptr;
 };
@@ -61,10 +65,14 @@ Options ParseArgs(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--list") o.list = true;
+        else if (a == "--probe-textures") o.probe_tex = true;
         else if (a == "--no-preview") o.preview = false;
         else if (a == "--seconds" && i + 1 < argc) o.seconds = std::atoi(argv[++i]);
         else if (a == "--delay" && i + 1 < argc) o.delay = std::atoi(argv[++i]);
         else if (a == "--dump-nv12" && i + 1 < argc) o.dump = argv[++i];
+        else if (a == "--encode" && i + 1 < argc) o.encode = argv[++i];
+        else if (a == "--bitrate" && i + 1 < argc)
+            o.bitrate = static_cast<std::uint32_t>(std::atof(argv[++i]) * 1e6);
         else if (a == "--process" && i + 1 < argc) o.process = Widen(argv[++i]);
         else if (a == "--hwnd" && i + 1 < argc)
             o.hwnd = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(
@@ -91,6 +99,10 @@ struct Shared {
     std::int64_t                       prev_content = 0;
     std::uint32_t                      w = 0, h = 0;
     std::uint64_t                      resized = 0;
+    std::vector<double>                encode_ms;
+    std::uint64_t                      bytes = 0;
+    std::uint64_t                      encoded = 0;
+    std::uint64_t                      keyframes = 0;
 };
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -110,6 +122,38 @@ int main(int argc, char** argv) {
     // without this the console renders both as mojibake.
     SetConsoleOutputCP(CP_UTF8);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
+
+    if (opt.probe_tex) {
+        winrt::com_ptr<ID3D11Device> d;
+        D3D_FEATURE_LEVEL flv{};
+        D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                          D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                          nullptr, 0, D3D11_SDK_VERSION, d.put(), &flv, nullptr);
+        struct { const char* name; UINT flags; } combos[] = {
+            {"UAV|SRV",        D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE},
+            {"UAV",            D3D11_BIND_UNORDERED_ACCESS},
+            {"SRV",            D3D11_BIND_SHADER_RESOURCE},
+            {"RTV|SRV",        D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE},
+            {"RTV",            D3D11_BIND_RENDER_TARGET},
+            {"DECODER",        D3D11_BIND_DECODER},
+            {"VIDEO_ENCODER",  D3D11_BIND_VIDEO_ENCODER},
+            {"UAV|SRV|RTV",    D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET},
+            {"none",           0},
+        };
+        for (UINT arr : {1u, 8u}) {
+            for (const auto& c : combos) {
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = 2560; td.Height = 1440; td.MipLevels = 1; td.ArraySize = arr;
+                td.Format = DXGI_FORMAT_NV12; td.SampleDesc = {1, 0};
+                td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = c.flags;
+                winrt::com_ptr<ID3D11Texture2D> t;
+                const HRESULT hr = d->CreateTexture2D(&td, nullptr, t.put());
+                std::printf("NV12 array=%-2u %-14s -> %s (0x%08lX)\n", arr, c.name,
+                            SUCCEEDED(hr) ? "OK  " : "FAIL", static_cast<unsigned long>(hr));
+            }
+        }
+        return 0;
+    }
 
     // --- pick a target ------------------------------------------------------
     HWND target = opt.hwnd;
@@ -144,11 +188,17 @@ int main(int argc, char** argv) {
     winrt::com_ptr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL                   fl{};
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+                                     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
                                  D3D11_SDK_VERSION, device.put(), &fl, context.put()))) {
         std::fprintf(stderr, "D3D11CreateDevice failed\n");
         return 1;
     }
+
+    // The capture callback and the main loop both touch the immediate context.
+    // Letting D3D serialise it is more robust than hoping our own locking covers
+    // every path, and libav will touch it too once encoding is wired up.
+    if (auto mt = device.try_as<ID3D11Multithread>()) mt->SetMultithreadProtected(TRUE);
 
     Shared sh;
 
@@ -199,6 +249,41 @@ int main(int argc, char** argv) {
                                         swap.put());
     }
 
+    // --- encoder (optional) -------------------------------------------------
+    Bgra2Nv12 conv;
+    Encoder   enc;
+    FILE*     out      = nullptr;
+    bool      encoding = false;
+    std::int64_t pts_base = 0;
+
+    if (!opt.encode.empty()) {
+        std::string e;
+        EncoderConfig ecfg;
+        ecfg.width       = cap_w;
+        ecfg.height      = cap_h;
+        ecfg.fps         = 60;
+        ecfg.bitrate_bps = opt.bitrate;
+
+        if (!conv.Init(device.get(), cap_w, cap_h, &e)) {
+            std::fprintf(stderr, "nv12 converter init failed: %s\n", e.c_str());
+            return 1;
+        }
+        if (!enc.Open(device.get(), context.get(), ecfg, &e)) {
+            std::fprintf(stderr, "encoder open failed: %s\n", e.c_str());
+            return 1;
+        }
+        out = std::fopen(opt.encode.c_str(), "wb");
+        if (!out) {
+            std::fprintf(stderr, "cannot open %s for writing\n", opt.encode.c_str());
+            return 1;
+        }
+        encoding = true;
+        std::printf("encoder: %s  %.1f Mbps CBR  %s  -> %s\n",
+                    enc.codec_name(), opt.bitrate / 1e6,
+                    enc.direct_write() ? "direct-to-pool" : "via scratch copy",
+                    opt.encode.c_str());
+    }
+
     // --- start capture ------------------------------------------------------
     WindowCapture capture;
     std::string   err;
@@ -228,6 +313,33 @@ int main(int argc, char** argv) {
         }
         sh.prev_content = f.content_time_100ns;
         sh.latency_ms.push_back((f.arrived_time_100ns - f.content_time_100ns) / 10000.0);
+
+        if (!encoding) return;
+
+        if (pts_base == 0) pts_base = f.content_time_100ns;
+        const std::int64_t pts_us = (f.content_time_100ns - pts_base) / 10;
+
+        ID3D11Texture2D* dst   = nullptr;
+        std::uint32_t    slice = 0;
+        std::string      e;
+
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!enc.BeginFrame(&dst, &slice, &e) ||
+            !conv.ConvertInto(context.get(), f.texture, dst, slice)) {
+            std::fprintf(stderr, "encode setup failed: %s\n", e.c_str());
+            return;
+        }
+        if (!enc.EndFrame(pts_us, [&](const EncodedPacket& p) {
+                std::fwrite(p.data, 1, p.size, out);
+                sh.bytes += p.size;
+                ++sh.encoded;
+                if (p.keyframe) ++sh.keyframes;
+            }, &e)) {
+            std::fprintf(stderr, "encode failed: %s\n", e.c_str());
+            return;
+        }
+        sh.encode_ms.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     };
 
     // WGC only delivers frames the game actually presents, and WoW honours its
@@ -256,14 +368,17 @@ int main(int argc, char** argv) {
     // simply "when the frame was produced" in QPC-now's epoch — most likely it is
     // a target present time. Treat the value as a stability indicator, not as
     // capture latency. Real glass-to-glass needs an on-screen clock and a camera.
-    std::printf("%-6s %6s %8s %8s %8s %8s %8s %7s\n",
+    std::printf("%-6s %6s %8s %8s %8s %8s %8s %7s",
                 "t", "fps", "int p50", "int p99", "int max", "Δts p50", "Δts p99", "pixels");
+    if (encoding) std::printf(" %8s %8s %8s", "enc p50", "enc p99", "Mbps");
+    std::printf("\n");
 
     // --- run ----------------------------------------------------------------
     const auto start = std::chrono::steady_clock::now();
     auto       next  = start + std::chrono::seconds(1);
     bool       quit  = false;
-    bool       dumped = false;
+    bool          dumped     = false;
+    std::uint64_t last_bytes = 0;
 
     while (!quit) {
         MSG msg;
@@ -314,11 +429,15 @@ int main(int argc, char** argv) {
             next += std::chrono::seconds(1);
 
             double mean_pixel = -1.0;
-            std::vector<double> iv, lat;
+            std::uint64_t period_bytes = 0;
+            std::vector<double> iv, lat, encv;
             {
                 std::lock_guard<std::mutex> lock(sh.mu);
                 iv.swap(sh.interval_ms);
                 lat.swap(sh.latency_ms);
+                encv.swap(sh.encode_ms);
+                period_bytes = sh.bytes - last_bytes;
+                last_bytes   = sh.bytes;
 
                 // Is this actually a picture, or a very healthy stream of black?
                 if (sh.latest && sh.w >= 64 && sh.h >= 64) {
@@ -356,12 +475,19 @@ int main(int argc, char** argv) {
 
             auto  ivc  = iv;
             const auto secs = std::chrono::duration<double>(now - start).count();
-            std::printf("%5.0fs %6zu %8.2f %8.2f %8.2f %8.2f %8.2f %7s\n",
+            std::printf("%5.0fs %6zu %8.2f %8.2f %8.2f %8.2f %8.2f %7s",
                         secs, iv.size(),
                         Percentile(ivc, 0.50), Percentile(ivc, 0.99),
                         iv.empty() ? 0.0 : *std::max_element(iv.begin(), iv.end()),
                         Percentile(lat, 0.50), Percentile(lat, 0.99),
                         mean_pixel < 0 ? "n/a" : (mean_pixel < 1.0 ? "BLACK" : "ok"));
+            if (encoding) {
+                auto encc = encv;
+                std::printf(" %8.2f %8.2f %8.2f",
+                            Percentile(encc, 0.50), Percentile(encv, 0.99),
+                            period_bytes * 8.0 / 1e6);
+            }
+            std::printf("\n");
         }
 
         if (opt.seconds > 0 && now - start >= std::chrono::seconds(opt.seconds)) break;
@@ -372,5 +498,16 @@ int main(int argc, char** argv) {
     std::printf("\ntotal frames: %llu   pool resizes: %llu\n",
                 static_cast<unsigned long long>(capture.frames()),
                 static_cast<unsigned long long>(sh.resized));
+
+    if (encoding) {
+        const double secs = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count();
+        std::printf("encoded %llu packets, %llu keyframes, %.1f MB, mean %.2f Mbps\n",
+                    static_cast<unsigned long long>(sh.encoded),
+                    static_cast<unsigned long long>(sh.keyframes),
+                    sh.bytes / 1e6, sh.bytes * 8.0 / 1e6 / secs);
+        enc.Close();
+        std::fclose(out);
+    }
     return 0;
 }

@@ -58,18 +58,25 @@ target_link_libraries(imgui PUBLIC d3d11 dxgi dwmapi)
 # Prebuilt shared win64 GPL build. We need: hevc/h264 decode with D3D11VA, the
 # nvenc/amf/qsv encoders, and libopus.
 #
-# VERIFIED GOOD: N-126717-g150c4e9edf-20260920 carries hevc_nvenc, hevc_amf,
-# hevc_qsv, h264_* fallbacks, libopus, and d3d11va/cuda/qsv/amf hwaccels — i.e.
-# every encoder path in DESIGN.md D5 plus the viewer's decoder.
+# PINNED, and the pin is load-bearing. FFmpeg tracks the NVENC SDK closely, and a
+# build newer than the installed driver refuses to open the encoder outright:
+# builds from 2026-07 onward require NVENC API 13.1 (driver >= 610.00), while the
+# development machine runs 596.36, which provides 13.0. 2026-05-31 is the newest
+# build verified working against that driver.
 #
-# TODO(setup): this is a ROLLING tag, so a green build can go red with no commit
-# behind it. Pin to the dated `autobuild-YYYY-MM-DD-HH-MM` release matching the
-# verified build above and record its SHA256 via URL_HASH.
+# If you update this pin, verify against the OLDEST driver you intend to support:
+#   ffmpeg.exe -f lavfi -i testsrc=size=640x480:rate=1 -frames:v 1 -c:v hevc_nvenc -f null -
+set(RAIDCAST_FFMPEG_TAG "autobuild-2026-05-31-13-22" CACHE STRING "FFmpeg build tag")
+set(RAIDCAST_FFMPEG_ZIP "ffmpeg-N-124714-g49a77d37be-win64-gpl-shared.zip" CACHE STRING "")
+set(RAIDCAST_FFMPEG_SHA256
+    "0c03e4ed5754742591191f4c41e67a7dd0c904e0d5f0e7e4bb4fe8729a99547d" CACHE STRING "")
 set(RAIDCAST_FFMPEG_URL
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/${RAIDCAST_FFMPEG_TAG}/${RAIDCAST_FFMPEG_ZIP}"
     CACHE STRING "URL of the prebuilt FFmpeg shared build")
 
-FetchContent_Declare(ffmpeg URL "${RAIDCAST_FFMPEG_URL}")
+FetchContent_Declare(ffmpeg
+    URL      "${RAIDCAST_FFMPEG_URL}"
+    URL_HASH "SHA256=${RAIDCAST_FFMPEG_SHA256}")
 FetchContent_MakeAvailable(ffmpeg)
 
 set(RAIDCAST_FFMPEG_ROOT "${ffmpeg_SOURCE_DIR}" CACHE PATH "" FORCE)

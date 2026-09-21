@@ -17,15 +17,20 @@ target_link_libraries(raidcast_capture PUBLIC
 )
 raidcast_enable_cppwinrt(raidcast_capture)
 
+# Encoding is split out so the capture library stays free of the FFmpeg dependency.
+add_library(raidcast_encode STATIC src/encoder.cpp)
+target_include_directories(raidcast_encode PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(raidcast_encode PUBLIC raidcast_common ffmpeg d3d11)
+
 add_executable(raidcast-host
     src/main.cpp
-    # TODO: encoder.cpp — libav hevc_nvenc / hevc_amf / hevc_qsv (D5)
     # TODO: sender.cpp  — Packetize() -> SRT listener             (D8)
     # TODO: ui.cpp      — ImGui panel: preview, status, kill      (D14, §7)
 )
 
 target_link_libraries(raidcast-host PRIVATE
     raidcast_capture
+    raidcast_encode
     srt_static
     imgui
     ffmpeg

@@ -12,7 +12,7 @@
 
 #define MyAppName "RaidCast"
 #define MyAppPublisher "RaidCast"
-#define MyAppURL "https://github.com/OWNER/raidcast"
+#define MyAppURL "https://github.com/clerwood/raidcast"
 
 [Setup]
 AppId={{8F3A6B21-4C7E-4C1E-9F2B-6D5A1E0C7B44}

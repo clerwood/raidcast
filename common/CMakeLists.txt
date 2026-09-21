@@ -7,5 +7,5 @@ target_include_directories(raidcast_common PUBLIC
 )
 
 target_compile_definitions(raidcast_common PUBLIC
-    RAIDCAST_VERSION="${PROJECT_VERSION}"
+    RAIDCAST_VERSION="${RAIDCAST_VERSION}"
 )

@@ -23,40 +23,32 @@ monitors, not Discord, not your notifications.
   send mouse or keyboard input to the host.
 - Your display settings are never touched. No resolution or refresh-rate changes.
 
-## What you need
+## Setup
 
-**Both machines:** Windows 10 (version 2004 or newer) or Windows 11, and Tailscale
-signed in on the same network.
+Both people do all three steps. It takes about five minutes, once.
 
-**The person sharing (host):** a graphics card from the last decade or so — NVIDIA,
-AMD or Intel all work. **WoW must be set to `Fullscreen (Windowed)`** in
-Options → Graphics, because Windows will not let us capture a game in true
-fullscreen.
+1. **Install [Tailscale](https://tailscale.com/download) and sign in.** You both
+   need to be on the same tailnet — if you are inviting someone, send them an
+   invite from the [admin console](https://login.tailscale.com/admin/users).
+   This is the only fiddly part, and once it is done it stays done.
 
-**The person watching (viewer):** a GPU that can decode HEVC — AMD, NVIDIA and
-Intel all can, going back roughly a decade. To check yours:
+2. **Install RaidCast** from
+   [**Releases**](https://github.com/clerwood/raidcast/releases). One installer,
+   both programs, no administrator rights. Windows will warn you that the
+   publisher is unknown — click **More info → Run anyway**. It is not
+   code-signed yet.
 
-```
-raidcast-viewer.exe --check
-```
+3. **Whoever is sharing** sets WoW to `Fullscreen (Windowed)` in
+   Options → Graphics. Windows will not let anything capture a game in true
+   fullscreen.
 
-It lists every graphics adapter, says which can decode, and tests your audio
-output. If your machine has more than one GPU, RaidCast picks a capable one by
-itself; `--adapter N` overrides that using the numbers `--check` prints.
+Then open **RaidCast Host** on the sharing machine and **RaidCast Viewer** on the
+watching one.
 
-## Install
-
-Download the latest installer from
-[**Releases**](https://github.com/clerwood/raidcast/releases) and run it. Both
-programs are included, so install it on both machines.
-
-Windows will warn you that the publisher is unknown, because the download is not
-code-signed yet. Click **More info → Run anyway**.
-
-There is also a portable `.zip` if you would rather not install anything.
-
-By default it installs for just you, to `%LOCALAPPDATA%\Programs\RaidCast`, and
-needs no administrator rights.
+> **Requirements:** Windows 10 version 2004 or newer. Any graphics card from
+> roughly the last decade works on either end — NVIDIA, AMD and Intel all encode
+> and decode HEVC. If you would rather not install anything, there is a portable
+> `.zip` on the same page.
 
 ## Using it
 
@@ -64,11 +56,11 @@ needs no administrator rights.
 
 1. Start WoW and make sure it is in `Fullscreen (Windowed)`.
 2. Open **RaidCast Host**.
-3. Check the preview looks right, then read out your Tailscale IP address — the
-   `100.x.y.z` one, which you can find by hovering the Tailscale tray icon.
+3. Check the preview looks right.
 
-The window shows `Waiting for viewer...` until someone connects, then live stats.
-**Stop** ends the session.
+That is the whole job. There is no address to read out — your machine shows up in
+a list on their end. The window says `Waiting for viewer...` until they connect,
+then shows live stats. **Stop** ends the session.
 
 ### Watching someone's game
 
@@ -78,7 +70,8 @@ press **Connect**. Each entry says whether the connection is **direct** or
 rather than after the picture goes bad.
 
 If their machine isn't listed yet, press **Refresh**. You can also type an address
-or machine name directly.
+or machine name directly — their `100.x.y.z` address is on their Tailscale tray
+icon if it ever comes to that.
 
 Volume and mute sit in the top-right of the viewer window. Both stick between
 sessions. You can go above 100% if the game audio comes through quieter than you
@@ -114,12 +107,19 @@ Run either from a terminal and output still appears there, which is what the
 
 ### Before a raid night
 
-Worth running once on the host machine. It starts capture, audio and the encoder,
-says what works, and names anything that does not:
+Worth running once on each machine, the first time. Both report what works and
+name anything that does not, so problems turn up while there is still time to fix
+them:
 
 ```
 %LOCALAPPDATA%\Programs\RaidCast\raidcast-host.exe --check
+%LOCALAPPDATA%\Programs\RaidCast\raidcast-viewer.exe --check
 ```
+
+On the host that starts capture, audio and the encoder. On the viewer it lists
+every graphics adapter and says which can decode, then tests your audio output.
+If that machine has more than one GPU, RaidCast picks a capable one by itself;
+`--adapter N` overrides it using the numbers `--check` prints.
 
 ## If something goes wrong
 

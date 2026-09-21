@@ -88,6 +88,8 @@ bool Presenter::Init(ID3D11Device* device, HWND hwnd, std::uint32_t width,
         return fail("GetBuffer failed");
     if (FAILED(device->CreateUnorderedAccessView(back.get(), nullptr, back_uav_.put())))
         return fail("backbuffer UAV failed");
+    if (FAILED(device->CreateRenderTargetView(back.get(), nullptr, back_rtv_.put())))
+        return fail("backbuffer RTV failed");
 
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth      = sizeof(Params);
@@ -96,52 +98,54 @@ bool Presenter::Init(ID3D11Device* device, HWND hwnd, std::uint32_t width,
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(device->CreateBuffer(&bd, nullptr, cb_.put()))) return fail("cbuffer failed");
 
-    return true;
-}
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width      = w_;
+    td.Height     = h_;
+    td.MipLevels  = 1;
+    td.ArraySize  = 1;
+    td.Format     = DXGI_FORMAT_NV12;
+    td.SampleDesc = {1, 0};
+    td.Usage      = D3D11_USAGE_DEFAULT;
+    td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, scratch_.put())))
+        return fail("sampleable NV12 texture allocation failed");
 
-Presenter::Views* Presenter::PlaneViews(ID3D11Texture2D* nv12, std::uint32_t slice) {
-    const auto key = std::make_pair(nv12, slice);
-    auto it = views_.find(key);
-    if (it != views_.end()) return &it->second;
-
-    auto make = [&](DXGI_FORMAT fmt, ID3D11ShaderResourceView** out) {
-        // As with UAVs, the NV12 plane is selected by view format: R8 is Y,
-        // R8G8 is the interleaved chroma plane.
+    auto plane_srv = [&](DXGI_FORMAT fmt, ID3D11ShaderResourceView** out) {
+        // NV12 plane selection is by view format: R8 is Y, R8G8 is chroma.
         D3D11_SHADER_RESOURCE_VIEW_DESC d{};
         d.Format                         = fmt;
         d.ViewDimension                  = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
         d.Texture2DArray.MostDetailedMip = 0;
         d.Texture2DArray.MipLevels       = 1;
         d.Texture2DArray.FirstArraySlice = 0;
-        d.Texture2DArray.ArraySize       = slice + 1;
-        return SUCCEEDED(device_->CreateShaderResourceView(nv12, &d, out));
+        d.Texture2DArray.ArraySize       = 1;
+        return SUCCEEDED(device->CreateShaderResourceView(scratch_.get(), &d, out));
     };
+    if (!plane_srv(DXGI_FORMAT_R8_UNORM, scratch_views_.y.put()) ||
+        !plane_srv(DXGI_FORMAT_R8G8_UNORM, scratch_views_.uv.put()))
+        return fail("NV12 plane SRVs failed");
 
-    Views v;
-    if (!make(DXGI_FORMAT_R8_UNORM, v.y.put()) || !make(DXGI_FORMAT_R8G8_UNORM, v.uv.put()))
-        return nullptr;
-
-    return &views_.emplace(key, std::move(v)).first->second;
+    return true;
 }
 
-bool Presenter::Present(ID3D11DeviceContext* ctx, ID3D11Texture2D* nv12,
-                        std::uint32_t slice) {
-    if (!swap_ || nv12 == nullptr) return false;
+bool Presenter::Render(ID3D11DeviceContext* ctx, ID3D11Texture2D* nv12,
+                       std::uint32_t slice) {
+    if (!swap_ || nv12 == nullptr || !scratch_) return false;
 
-    Views* v = PlaneViews(nv12, slice);
-    if (!v) return false;
+    // One VRAM-to-VRAM copy out of the decoder pool into something samplable.
+    ctx->CopySubresourceRegion(scratch_.get(), 0, 0, 0, 0, nv12, slice, nullptr);
 
-    if (cb_slice_ != slice) {
+    if (cb_slice_ != 0) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(cb_.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            Params p{w_, h_, slice, 0};
+            Params p{w_, h_, 0, 0};  // always slice 0 of the scratch texture
             *static_cast<Params*>(m.pData) = p;
             ctx->Unmap(cb_.get(), 0);
-            cb_slice_ = slice;
+            cb_slice_ = 0;
         }
     }
 
-    ID3D11ShaderResourceView*  srvs[] = {v->y.get(), v->uv.get()};
+    ID3D11ShaderResourceView*  srvs[] = {scratch_views_.y.get(), scratch_views_.uv.get()};
     ID3D11UnorderedAccessView* uavs[] = {back_uav_.get()};
     ID3D11Buffer*              cbs[]  = {cb_.get()};
 
@@ -155,8 +159,12 @@ bool Presenter::Present(ID3D11DeviceContext* ctx, ID3D11Texture2D* nv12,
     ID3D11UnorderedAccessView* no_uav[] = {nullptr};
     ctx->CSSetShaderResources(0, 2, no_srv);
     ctx->CSSetUnorderedAccessViews(0, 1, no_uav, nullptr);
+    return true;
+}
 
+bool Presenter::Swap() {
     // Sync interval 0: present now, tear if we must.
+    if (!swap_) return false;
     return SUCCEEDED(swap_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0u));
 }
 

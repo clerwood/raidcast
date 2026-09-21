@@ -3,12 +3,13 @@ add_executable(raidcast-viewer
     src/decoder.cpp
     src/present.cpp
     src/audio_player.cpp
-    # TODO: overlay.cpp — ImGui stats overlay                        (§11)
+    src/overlay.cpp
 )
 
 target_link_libraries(raidcast-viewer PRIVATE
     raidcast_common
     raidcast_transport
+    raidcast_ui
     ffmpeg
     d3d11
     dxgi

@@ -24,17 +24,18 @@ target_link_libraries(raidcast_encode PUBLIC raidcast_common ffmpeg d3d11)
 
 add_executable(raidcast-host
     src/main.cpp
-    # TODO: ui.cpp      — ImGui panel: preview, status, kill      (D14, §7)
+    src/ui.cpp
 )
 
 target_link_libraries(raidcast-host PRIVATE
     raidcast_capture
     raidcast_encode
     raidcast_transport
-    imgui
+    raidcast_ui
     mmdevapi       # WASAPI process loopback
 )
 
+raidcast_enable_cppwinrt(raidcast-host)
 raidcast_stage_runtime(raidcast-host)
 
 install(TARGETS raidcast-host RUNTIME DESTINATION .)

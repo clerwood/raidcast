@@ -24,10 +24,14 @@ set(ENABLE_SHARED       OFF CACHE BOOL "" FORCE)
 set(ENABLE_STATIC       ON  CACHE BOOL "" FORCE)
 set(ENABLE_UNITTESTS    OFF CACHE BOOL "" FORCE)
 
+# EXCLUDE_FROM_ALL keeps SRT's own install() rules out of our install prefix.
+# Without it, `cmake --install` drops SRT's bin/, include/ and lib/ trees next
+# to the executables and they end up inside the installer.
 FetchContent_Declare(srt
-    GIT_REPOSITORY https://github.com/Haivision/srt.git
-    GIT_TAG        v1.5.3
-    GIT_SHALLOW    TRUE
+    GIT_REPOSITORY  https://github.com/Haivision/srt.git
+    GIT_TAG         v1.5.3
+    GIT_SHALLOW     TRUE
+    EXCLUDE_FROM_ALL
 )
 
 # --- Dear ImGui --------------------------------------------------------------
@@ -87,8 +91,22 @@ foreach(lib avcodec avformat avutil swresample swscale)
     target_link_libraries(ffmpeg INTERFACE "${RAIDCAST_FFMPEG_ROOT}/lib/${lib}.lib")
 endforeach()
 
-# The DLLs must sit next to the executables at runtime and ship in the installer.
-file(GLOB RAIDCAST_FFMPEG_DLLS "${RAIDCAST_FFMPEG_ROOT}/bin/*.dll")
+# Only the libraries we actually call. Shipping the whole bin/ directory adds
+# ~130 MB of avfilter, avdevice and avformat that nothing in RaidCast touches.
+# Verified empirically: the host and viewer run with exactly these three.
+#
+# TODO(size): avcodec alone is ~93 MB because this is a full GPL build carrying
+# every codec. Building FFmpeg ourselves with just hevc/h264/opus would cut the
+# installer by an order of magnitude, at the cost of owning an FFmpeg build.
+set(RAIDCAST_FFMPEG_DLL_NAMES avcodec avutil swresample)
+set(RAIDCAST_FFMPEG_DLLS "")
+foreach(name ${RAIDCAST_FFMPEG_DLL_NAMES})
+    file(GLOB found "${RAIDCAST_FFMPEG_ROOT}/bin/${name}-*.dll")
+    list(APPEND RAIDCAST_FFMPEG_DLLS ${found})
+endforeach()
+if(NOT RAIDCAST_FFMPEG_DLLS)
+    message(FATAL_ERROR "no FFmpeg runtime DLLs found under ${RAIDCAST_FFMPEG_ROOT}/bin")
+endif()
 
 function(raidcast_stage_runtime target)
     foreach(dll ${RAIDCAST_FFMPEG_DLLS})

@@ -19,3 +19,7 @@ third_party/ffmpeg/
 
 # Installer output
 installer/Output/
+
+# `cmake --install` prefix. Contains ~100 MB of FFmpeg runtime; must never be
+# committed.
+staging/

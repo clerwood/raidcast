@@ -7,10 +7,13 @@ Built for raid leaders who call mechanics from outside the raid: they need to re
 raid frames, debuff stacks and boss timers in near-real-time, and hear boss emotes.
 They do not need to control anything, and they should not see anything that isn't WoW.
 
-> **Status: pre-alpha, but it streams.** Video runs end to end — window capture →
-> NV12 → HEVC → SRT → decode → present — verified against a live WoW client.
-> Not yet built: audio, Tailscale onboarding and identity checks, and the UI.
-> Not yet tested over a real network; only loopback so far.
+> **Status: pre-alpha, but it works.** Video and game audio stream end to end —
+> window capture → NV12 → HEVC → SRT → decode → present, plus per-process Opus
+> audio — verified against a live WoW client. The host has a control panel with a
+> live preview; the viewer has a Tab-toggled stats overlay.
+>
+> Not yet built: Tailscale onboarding and identity checks. Not yet tested over a
+> real network; only loopback so far.
 
 ## Why not X
 
@@ -75,6 +78,12 @@ host/      WGC capture, BGRA->NV12 shader, hardware HEVC encode, send
 viewer/    receive, reassemble, hardware decode, present
 tools/     capture-probe, a diagnostic for the capture and encode stages
 installer/ Inno Setup script
+```
+
+Check that everything a session needs actually comes up:
+
+```sh
+build/windows/host/RelWithDebInfo/raidcast-host.exe --check
 ```
 
 Try it on one machine — run the host, then the viewer:

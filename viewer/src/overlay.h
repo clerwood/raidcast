@@ -31,6 +31,12 @@ struct ViewerStats {
     float         audio_peak_db   = -120.0f;  // arriving
     float         audio_out_db    = -120.0f;  // reaching the speakers
     bool          audio_ok        = false;
+    // Seconds since the last decoded frame, once that is longer than a stutter;
+    // 0 when video is flowing. A stall with audio still playing is invisible to
+    // every other number here, so it gets a banner of its own (watchdog.h).
+    double        stalled_for_s   = 0;
+    int           keyframe_requests = 0;  // asked for during the current stall
+    int           reconnects        = 0;  // over the whole session
 };
 
 // Playback controls the overlay edits in place.

@@ -86,6 +86,25 @@ want; it clamps rather than distorting into noise.
 
 Press **Tab** once connected to show or hide connection stats.
 
+### When the stream stops
+
+Neither end gives up, and neither needs restarting.
+
+If the host goes away — it crashes, the machine reboots, the wifi drops — the viewer says
+**Lost the stream** over the last frame and keeps retrying until it comes back. The host
+goes back to `Waiting for viewer...` and accepts the reconnection when it arrives. There
+is nothing to click.
+
+If the picture freezes while **sound keeps playing**, the connection is fine and the host
+has stopped sending video. That normally means WoW was alt-tabbed away: Windows only
+hands us frames while the game is drawing. The viewer says so on screen rather than
+leaving you guessing, and asks the host for a fresh picture once a second. The host says
+`Not capturing` and rebuilds its capture a few seconds in. Between them it usually fixes
+itself; if it does not, the host should click back into WoW.
+
+A viewer that has been waiting a while can press **Pick another host** to go back to the
+list without restarting.
+
 Neither program opens a command prompt. Messages go to a **Log** section inside
 the window, with a **Copy** button — so if something goes wrong you can paste the
 whole thing rather than describe it.
@@ -114,6 +133,8 @@ says what works, and names anything that does not:
 | Viewer's host list is empty | The other person is not on your tailnet yet. Invite them from the Tailscale admin console, then press Refresh. |
 | Viewer says `cannot resolve` or `connect ... failed` | The viewer window shows your Tailscale state and what to do about it. Both machines must be signed in and online. |
 | Host says `not on the allowlist` | You started the host with `--allow`, and the caller's Tailscale login isn't listed. |
+| **Picture frozen but sound still playing** | The host has stopped sending video — usually WoW was alt-tabbed away. The host window says `Not capturing` when this is happening and tries to fix it by itself; if it persists, the host should click back into WoW. |
+| **`Lost the stream`** | The host went away. The viewer retries by itself until it comes back, so you can leave it alone — see below. |
 | Stream is choppy or blurry | Confirm Tailscale connected you **directly**. Run `tailscale status` on the host: a `relay` connection instead of `direct` cannot carry video. Forwarding UDP port 41641 to the host usually fixes it. |
 | `host protocol vN, viewer vM` | The two machines are on different RaidCast versions. Update both. |
 

@@ -8,6 +8,10 @@
 // Conversion runs inside the decode callback because a decoded frame's texture
 // is only valid for the duration of that callback. The overlay and the swap
 // happen afterwards, on the backbuffer, which is ours to hold.
+//
+// The session is a loop, not a straight line: pick a host, stream until
+// something breaks, reconnect, stream again. A stream that stops should cost
+// seconds, not a relaunch in the middle of a pull (reconnect.h, watchdog.h).
 
 #include "audio_player.h"
 #include "connect_ui.h"
@@ -16,8 +20,10 @@
 #include "overlay.h"
 #include "present.h"
 #include "raidcast/protocol.h"
+#include "reconnect.h"
 #include "srt_link.h"
 #include "ui_shell.h"
+#include "watchdog.h"
 #include "log.h"
 #include "settings.h"
 #include "updater.h"
@@ -30,9 +36,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace raidcast;
+
+namespace {
+
+enum class Phase {
+    Picking,       // the host picker is up
+    Streaming,     // a link is live
+    Reconnecting,  // the link died; retrying in the background
+};
+
+// How often to redraw a status screen that has no video pacing it. The
+// presenter presents uncapped, which is right for frames and wrong for a
+// banner: without this the viewer spins the GPU for the whole outage.
+constexpr std::chrono::milliseconds kStatusRedraw{33};
+
+}  // namespace
 
 int main(int argc, char** argv) {
     AttachParentConsole();
@@ -139,91 +161,127 @@ int main(int argc, char** argv) {
     }
     updater.CheckAsync(RAIDCAST_VERSION, settings.update_channel);
 
-    // --- pick a host --------------------------------------------------------
-    SrtLink link;
     if (host.empty() && !want_ui) {
         FatalError("--host is required with --headless\n");
         return 1;
     }
 
-    if (host.empty()) {
-        // Connect phase gets its own swapchain; the presenter takes over the
-        // window once video starts, and DXGI will not allow both at once.
-        UiSwapchain  connect_swap;
-        ConnectPanel panel;
-        std::string  last_error;
-        bool         connected = false;
+    // --- session ------------------------------------------------------------
+    SrtLink         link;
+    Reconnector     reconnector;
+    ReconnectTarget target;
+    target.port       = port;
+    target.latency_ms = latency;
+    target.stream_id  = MakeStreamId(user);
 
-        if (!connect_swap.Init(device.get(), window.hwnd(), &err)) {
-            FatalError("UI swapchain failed: %s\n", err.c_str());
-            return 1;
+    // DXGI allows one swapchain per HWND, so the picker and the video presenter
+    // take turns holding the window.
+    UiSwapchain  connect_swap;
+    ConnectPanel panel;
+    Presenter    presenter;
+    bool         ui_surface      = false;
+    bool         presenter_ready = false;
+    std::string  last_error;
+
+    auto take_ui_surface = [&]() -> bool {
+        if (!want_ui) return true;
+        if (ui_surface) return true;
+        presenter.Reset(context.get());
+        presenter_ready = false;
+        std::string e;
+        if (!connect_swap.Init(device.get(), window.hwnd(), &e)) {
+            LogError("UI swapchain failed: %s\n", e.c_str());
+            return false;
         }
+        ui_surface = true;
+        return true;
+    };
 
-        while (!connected) {
-            if (!window.Pump()) return 0;
-
-            std::uint32_t w = 0, h = 0;
-            window.Size(&w, &h);
-            connect_swap.ResizeIfNeeded(w, h);
-
-            shell.NewFrame();
-            const ConnectChoice choice = panel.Draw(&settings.update_channel, last_error);
-            if (choice.channel_changed) {
-                std::string serr;
-                if (!SaveSettings(settings, &serr))
-                    LogError("could not save settings: %s\n", serr.c_str());
-            }
-            updater.DrawToast();
-            shell.RenderTo(context.get(), connect_swap.rtv());
-            connect_swap.Present();
-
-            if (choice.quit) return 0;
-            if (!choice.connect) continue;
-
-            Log("connecting to %s:%u...\n", choice.host.c_str(), port);
-            if (link.Connect(choice.host, port, latency, MakeStreamId(user), &err)) {
-                host      = choice.host;
-                connected = true;
-            } else {
-                last_error = err;
-                LogError("%s\n", err.c_str());
-            }
-        }
+    auto release_ui_surface = [&]() {
+        if (!ui_surface) return;
         connect_swap.Reset(context.get());
-    } else if (!link.Connect(host, port, latency, MakeStreamId(user), &err)) {
-        FatalError("connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
-        return 1;
-    }
+        ui_surface = false;
+    };
 
-    Log("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
-    if (!want_ui)
-        Log("\n%-6s %8s %8s %9s %9s %8s %8s %9s %9s\n", "t", "frames", "Mbps", "dec p50",
-                    "drops", "rtt ms", "aud ms", "in dBFS", "out dBFS");
-
-    // --- stream -------------------------------------------------------------
-    Presenter                 presenter;
-    bool                      presenter_ready = false;
-    bool                      software_warned = false;
-    bool                      overlay_visible = true;
-    ViewerControls            controls;
-    controls.volume = settings.volume;
-    controls.muted  = settings.muted;
-    audio.SetGain(controls.muted ? 0.0f : controls.volume);
     Reassembler               reasm;
+    StallWatchdog             watchdog;
     std::vector<std::uint8_t> buf(kMaxPayload * 2);
     std::vector<double>       decode_ms;
     std::uint64_t             decoded = 0, bytes = 0, last_decoded = 0, last_bytes = 0;
     long long                 last_lost = 0;
     std::uint64_t             last_dropped = 0;
+    std::uint32_t             control_seq = 0;
     ViewerStats               stats;
-    stats.host           = host;
     stats.srt_latency_ms = latency;
     stats.audio_ok       = audio_ok;
 
+    bool           software_warned = false;
+    bool           overlay_visible = true;
+    // Whether the current stall has already cost a reconnect. Cleared by the
+    // first frame that decodes.
+    bool           stall_reconnect_used = false;
+    ViewerControls controls;
+    controls.volume = settings.volume;
+    controls.muted  = settings.muted;
+    audio.SetGain(controls.muted ? 0.0f : controls.volume);
+
+    // Everything that must not survive from one link to the next. The decoder
+    // is rebuilt rather than flushed: its reference frames belong to a stream
+    // that has ended, and decoding the new one against them produces a smeared
+    // picture that looks like a network fault.
+    auto begin_session = [&](const std::string& peer) {
+        reasm = Reassembler{};
+        audio.Flush();
+
+        std::string de;
+        dec.Close();
+        if (!dec.Open(device.get(), /*hevc=*/true, &de))
+            LogError("decoder restart failed: %s\n", de.c_str());
+
+        watchdog.Reset(std::chrono::steady_clock::now());
+        decode_ms.clear();
+        last_decoded = decoded;
+        last_bytes   = bytes;
+        last_lost    = 0;
+        last_dropped = reasm.frames_dropped();
+        stats.host   = peer;
+        stats.fps    = 0;
+        stats.stalled_for_s     = 0;
+        stats.keyframe_requests = 0;
+        software_warned = false;
+    };
+
+    auto start_reconnect = [&](const char* why) {
+        LogError("%s - reconnecting to %s\n", why, target.host.c_str());
+        link.Close();
+        ++stats.reconnects;
+        reconnector.Start(target);
+    };
+
+    Phase phase = Phase::Picking;
+    if (!host.empty()) {
+        target.host = host;
+        if (!link.Connect(target.host, port, latency, target.stream_id, &err)) {
+            FatalError("connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
+            return 1;
+        }
+        Log("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
+        begin_session(target.host);
+        phase = Phase::Streaming;
+    } else if (!take_ui_surface()) {
+        return 1;
+    }
+
+    if (!want_ui)
+        Log("\n%-6s %8s %8s %9s %9s %8s %8s %9s %9s\n", "t", "frames", "Mbps", "dec p50",
+                    "drops", "rtt ms", "aud ms", "in dBFS", "out dBFS");
+
     const auto start = std::chrono::steady_clock::now();
     auto       next  = start + std::chrono::seconds(1);
+    auto       last_banner = std::chrono::steady_clock::time_point{};
+    bool       quit  = false;
 
-    for (;;) {
+    while (!quit) {
         if (want_ui && !window.Pump()) {
             Log("\nwindow closed\n");
             break;
@@ -235,66 +293,220 @@ int main(int argc, char** argv) {
         }
 
         bool rendered = false;
+        const auto now = std::chrono::steady_clock::now();
 
-        const int n = link.Recv(buf.data(), buf.size(), want_ui ? 4 : 200, &err);
-        if (n < 0) {
-            Log("\nhost disconnected\n");
-            break;
-        }
-        if (n > 0) {
-            if (auto frame = reasm.Push(buf.data(), static_cast<std::size_t>(n))) {
-                if (frame->channel == Channel::Audio) {
-                    if (audio_ok) {
-                        std::string ae;
-                        audio.Push(frame->data.data(), frame->data.size(), &ae);
-                    }
-                } else {
-                    const auto  t0 = std::chrono::steady_clock::now();
-                    std::string de;
-                    dec.Decode(frame->data.data(), frame->data.size(),
-                               static_cast<std::int64_t>(frame->pts_us),
-                               [&](const DecodedFrame& f) {
-                                   ++decoded;
-                                   stats.width  = f.width;
-                                   stats.height = f.height;
-                                   if (!f.texture && want_ui && !software_warned) {
-                                       // Otherwise this is a blank window that
-                                       // decodes perfectly and explains nothing.
-                                       software_warned = true;
-                                       LogError("This GPU declined to decode HEVC, so nothing "
-                                                "can be displayed.");
-                                       LogError("Run with --check to see which adapters can, "
-                                                "then --adapter N to pick one.");
-                                   }
-                                   if (!f.texture || !want_ui) return;
+        switch (phase) {
+            // ---------------------------------------------------------------
+            case Phase::Picking: {
+                if (!want_ui) { quit = true; break; }
 
-                                   if (!presenter_ready) {
-                                       std::string pe;
-                                       if (presenter.Init(device.get(), window.hwnd(), f.width,
-                                                          f.height, &pe)) {
-                                           presenter_ready = true;
-                                           Log("presenting %ux%u%s\n", f.width,
-                                                       f.height,
-                                                       presenter.tearing_allowed()
-                                                           ? " (tearing allowed)" : "");
-                                       } else {
-                                           LogError("present init failed: %s\n",
-                                                        pe.c_str());
-                                           return;
-                                       }
-                                   }
-                                   if (presenter.Render(context.get(), f.texture, f.slice))
-                                       rendered = true;
-                               },
-                               &de);
-                    decode_ms.push_back(std::chrono::duration<double, std::milli>(
-                                            std::chrono::steady_clock::now() - t0).count());
-                    bytes += frame->data.size();
+                std::uint32_t w = 0, h = 0;
+                window.Size(&w, &h);
+                connect_swap.ResizeIfNeeded(w, h);
+
+                shell.NewFrame();
+                const ConnectChoice choice = panel.Draw(&settings.update_channel, last_error);
+                if (choice.channel_changed) {
+                    std::string serr;
+                    if (!SaveSettings(settings, &serr))
+                        LogError("could not save settings: %s\n", serr.c_str());
                 }
+                updater.DrawToast();
+                shell.RenderTo(context.get(), connect_swap.rtv());
+                connect_swap.Present();
+
+                if (choice.quit) { quit = true; break; }
+                if (!choice.connect) break;
+
+                Log("connecting to %s:%u...\n", choice.host.c_str(), port);
+                if (link.Connect(choice.host, port, latency, target.stream_id, &err)) {
+                    target.host = choice.host;
+                    last_error.clear();
+                    Log("connected to %s:%u, SRT latency %d ms\n", target.host.c_str(), port,
+                        latency);
+                    begin_session(target.host);
+                    phase = Phase::Streaming;
+                } else {
+                    last_error = err;
+                    LogError("%s\n", err.c_str());
+                }
+                break;
+            }
+
+            // ---------------------------------------------------------------
+            case Phase::Streaming: {
+                const int n = link.Recv(buf.data(), buf.size(), want_ui ? 4 : 200, &err);
+                if (n < 0) {
+                    start_reconnect("host disconnected");
+                    phase = Phase::Reconnecting;
+                    break;
+                }
+                if (n > 0) {
+                    if (auto frame = reasm.Push(buf.data(), static_cast<std::size_t>(n))) {
+                        if (frame->channel == Channel::Audio) {
+                            if (audio_ok) {
+                                std::string ae;
+                                audio.Push(frame->data.data(), frame->data.size(), &ae);
+                            }
+                        } else if (frame->channel == Channel::Video) {
+                            const auto  t0 = std::chrono::steady_clock::now();
+                            std::string de;
+                            dec.Decode(frame->data.data(), frame->data.size(),
+                                       static_cast<std::int64_t>(frame->pts_us),
+                                       [&](const DecodedFrame& f) {
+                                           ++decoded;
+                                           watchdog.NoteVideo(std::chrono::steady_clock::now());
+                                           // Video is flowing again, so a future
+                                           // stall gets its own reconnect.
+                                           stall_reconnect_used = false;
+                                           stats.width  = f.width;
+                                           stats.height = f.height;
+                                           if (!f.texture && want_ui && !software_warned) {
+                                               // Otherwise this is a blank window that
+                                               // decodes perfectly and explains nothing.
+                                               software_warned = true;
+                                               LogError("This GPU declined to decode HEVC, so nothing "
+                                                        "can be displayed.");
+                                               LogError("Run with --check to see which adapters can, "
+                                                        "then --adapter N to pick one.");
+                                           }
+                                           if (!f.texture || !want_ui) return;
+
+                                           // A host that restarted WoW at a new
+                                           // resolution needs a new swapchain.
+                                           if (presenter_ready && (f.width != presenter.width() ||
+                                                                   f.height != presenter.height())) {
+                                               presenter.Reset(context.get());
+                                               presenter_ready = false;
+                                           }
+                                           if (!presenter_ready) {
+                                               release_ui_surface();
+                                               std::string pe;
+                                               if (presenter.Init(device.get(), window.hwnd(), f.width,
+                                                                  f.height, &pe)) {
+                                                   presenter_ready = true;
+                                                   Log("presenting %ux%u%s\n", f.width,
+                                                               f.height,
+                                                               presenter.tearing_allowed()
+                                                                   ? " (tearing allowed)" : "");
+                                               } else {
+                                                   LogError("present init failed: %s\n",
+                                                                pe.c_str());
+                                                   return;
+                                               }
+                                           }
+                                           if (presenter.Render(context.get(), f.texture, f.slice))
+                                               rendered = true;
+                                       },
+                                       &de);
+                            decode_ms.push_back(std::chrono::duration<double, std::milli>(
+                                                    std::chrono::steady_clock::now() - t0).count());
+                            bytes += frame->data.size();
+                        }
+                    }
+                }
+
+                // The link can be perfectly healthy while the picture is not:
+                // audio keeps playing, SRT keeps ACKing, and no error is ever
+                // reported. Only elapsed time without a decoded frame sees it.
+                switch (watchdog.Poll(now)) {
+                    case StallWatchdog::Action::RequestKeyframe: {
+                        const auto dg = MakeControl(ControlType::RequestKeyframe, control_seq++);
+                        std::string ce;
+                        if (!link.Send(dg.data(), dg.size(), &ce)) {
+                            start_reconnect("lost the host while asking for a keyframe");
+                            phase = Phase::Reconnecting;
+                            break;
+                        }
+                        stats.keyframe_requests = watchdog.requests();
+                        if (watchdog.requests() == 1)
+                            LogError("video stopped %.1fs ago - asked the host for a keyframe\n",
+                                     watchdog.stalled_for_s(now));
+                        break;
+                    }
+                    case StallWatchdog::Action::Reconnect:
+                        if (stall_reconnect_used) {
+                            // We already rebuilt the session for this stall and
+                            // the picture did not come back, so the host is not
+                            // producing video. Keep the banner and the keyframe
+                            // requests; stop cycling the connection.
+                            watchdog.DisarmReconnect();
+                            LogError("still no video after reconnecting - the host has "
+                                     "stopped sending. Waiting for it to come back.\n");
+                            break;
+                        }
+                        stall_reconnect_used = true;
+                        start_reconnect("video has not arrived for 12s");
+                        phase = Phase::Reconnecting;
+                        break;
+                    case StallWatchdog::Action::None:
+                        break;
+                }
+                break;
+            }
+
+            // ---------------------------------------------------------------
+            case Phase::Reconnecting: {
+                if (reconnector.ready()) {
+                    link = reconnector.Take();
+                    Log("reconnected to %s:%u after %d attempt(s)\n", target.host.c_str(), port,
+                        reconnector.attempts());
+                    begin_session(target.host);
+                    phase = Phase::Streaming;
+                    break;
+                }
+                if (!want_ui) {
+                    // Headless has no window to draw on; the log is the UI.
+                    // Nothing else paces this phase, so don't spin.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    break;
+                }
+
+                // Keep the last frame on screen under the banner where we can:
+                // a frozen picture of the pull is worth more than a blank
+                // window, and it is what the viewer was already looking at.
+                const bool over_video = presenter_ready && !ui_surface;
+                if (over_video) {
+                    // The presenter presents uncapped (sync interval 0), which
+                    // is right for video and wrong for a status banner: it
+                    // would spin the GPU for the whole outage. The UI
+                    // swapchain paces itself to vblank and needs no throttle.
+                    if (now - last_banner < kStatusRedraw) break;
+                    last_banner = now;
+                    if (!presenter.Repaint(context.get())) break;
+                } else {
+                    if (!take_ui_surface()) { quit = true; break; }
+                    std::uint32_t w = 0, h = 0;
+                    window.Size(&w, &h);
+                    connect_swap.ResizeIfNeeded(w, h);
+                }
+
+                shell.NewFrame();
+                const ReconnectChoice rc =
+                    DrawReconnectPanel(target.host, reconnector.attempts(),
+                                       reconnector.seconds_until_retry(),
+                                       reconnector.last_error(), over_video);
+                updater.DrawToast();
+                shell.RenderTo(context.get(),
+                               over_video ? presenter.rtv() : connect_swap.rtv());
+                if (over_video)
+                    presenter.Swap();
+                else
+                    connect_swap.Present();
+
+                if (rc.quit) { quit = true; break; }
+                if (rc.pick_another) {
+                    reconnector.Cancel();
+                    last_error.clear();
+                    if (!take_ui_surface()) { quit = true; break; }
+                    phase = Phase::Picking;
+                }
+                break;
             }
         }
 
-        const auto now = std::chrono::steady_clock::now();
+        if (quit) break;
+
         if (now >= next) {
             next += std::chrono::seconds(1);
             std::sort(decode_ms.begin(), decode_ms.end());
@@ -333,32 +545,67 @@ int main(int argc, char** argv) {
 
         // Only swap when there is a fresh frame: FLIP_DISCARD leaves the
         // backbuffer undefined after a present, so drawing the overlay alone
-        // would put it on garbage.
-        if (want_ui && rendered && presenter_ready) {
+        // would put it on garbage. A stall is the exception - see Repaint().
+        // Connected, but nothing decodable has arrived yet, so there is no
+        // video surface to draw on. Without this the window sits on whatever
+        // the picker last drew - which is exactly the silent freeze this whole
+        // change exists to get rid of.
+        if (want_ui && phase == Phase::Streaming && !presenter_ready && ui_surface &&
+            now - last_banner >= kStatusRedraw) {
+            last_banner = now;
+            std::uint32_t w = 0, h = 0;
+            window.Size(&w, &h);
+            connect_swap.ResizeIfNeeded(w, h);
+
             shell.NewFrame();
-            controls.changed = false;
-            DrawViewerOverlay(stats, &overlay_visible, &controls);
-            if (controls.changed) {
-                audio.SetGain(controls.muted ? 0.0f : controls.volume);
-                settings.volume = controls.volume;
-                settings.muted  = controls.muted;
-                std::string serr;
-                if (!SaveSettings(settings, &serr))
-                    LogError("could not save settings: %s\n", serr.c_str());
-            }
+            DrawWaitingPanel(target.host, watchdog.stalled_for_s(now));
             updater.DrawToast();
-            shell.RenderTo(context.get(), presenter.rtv());
-            presenter.Swap();
+            shell.RenderTo(context.get(), connect_swap.rtv());
+            connect_swap.Present();
+        }
+
+        if (want_ui && phase == Phase::Streaming && presenter_ready) {
+            const bool stalled = watchdog.stalled(now);
+            // Nothing is arriving to pace us during a stall, and the presenter
+            // presents uncapped, so redraw the banner on a timer instead.
+            bool repainted = false;
+            if (!rendered && stalled && now - last_banner >= kStatusRedraw) {
+                last_banner = now;
+                repainted   = presenter.Repaint(context.get());
+            }
+            if (rendered || repainted) {
+                shell.NewFrame();
+                controls.changed = false;
+                // Sampled here rather than in the once-a-second tick: this is
+                // the number the banner counts up, and it has to move.
+                stats.stalled_for_s = stalled ? watchdog.stalled_for_s(now) : 0.0;
+                DrawViewerOverlay(stats, &overlay_visible, &controls);
+                if (controls.changed) {
+                    audio.SetGain(controls.muted ? 0.0f : controls.volume);
+                    settings.volume = controls.volume;
+                    settings.muted  = controls.muted;
+                    std::string serr;
+                    if (!SaveSettings(settings, &serr))
+                        LogError("could not save settings: %s\n", serr.c_str());
+                }
+                updater.DrawToast();
+                shell.RenderTo(context.get(), presenter.rtv());
+                presenter.Swap();
+            }
         }
 
         if (seconds > 0 && now - start >= std::chrono::seconds(seconds)) break;
     }
+
+    reconnector.Cancel();
 
     Log("\ndecoded %llu frames; reassembly completed %llu, dropped %llu, bad %llu\n",
                 static_cast<unsigned long long>(decoded),
                 static_cast<unsigned long long>(reasm.frames_completed()),
                 static_cast<unsigned long long>(reasm.frames_dropped()),
                 static_cast<unsigned long long>(reasm.packets_bad()));
+    if (stats.reconnects > 0)
+        Log("reconnected %d time(s) during the session\n", stats.reconnects);
 
     if (want_ui) {
         shell.Shutdown();

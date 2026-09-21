@@ -139,6 +139,32 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Control channel — the viewer's only upstream traffic.
+//
+// Video and audio flow one way (D1). This is the exception, and it is
+// deliberately tiny: a viewer whose picture has stalled needs a decodable entry
+// point, and with an infinite GOP (D5) the next one is up to `idr_interval_s`
+// away. Asking for it costs one datagram and turns a ten-second freeze into a
+// sub-second one.
+//
+// It carries no input events and never will — see the NO INPUT PATH invariant
+// in host/src/main.cpp. The host's handling of every control message must stay
+// confined to the encoder.
+// ---------------------------------------------------------------------------
+
+enum class ControlType : std::uint8_t {
+    RequestKeyframe = 1,
+};
+
+// Always one datagram: control bodies are a single byte.
+Datagram MakeControl(ControlType type, std::uint32_t seq);
+
+// Returns the message type, or nullopt if `f` is not a well-formed control
+// frame. Unknown types are rejected rather than ignored, so a newer viewer
+// asking for something this host does not implement is visible.
+std::optional<ControlType> ParseControl(const Frame& f);
+
+// ---------------------------------------------------------------------------
 // SRT stream id — "raidcast/<major>;user=<login>"
 //
 // The caller sets it; the listener reads it during the handshake and can reject

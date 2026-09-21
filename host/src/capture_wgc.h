@@ -58,11 +58,30 @@ public:
                std::string* error = nullptr);
     void Stop();
 
+    // Tears the capture session down and starts a new one on the *same* window.
+    //
+    // WGC can stop delivering frames while the session still looks alive —
+    // observed when the target is alt-tabbed away and the frame pool is
+    // recreated at a new size. Nothing reports it: no error, no Closed event,
+    // the session just goes quiet, and the viewer sits on its last frame with
+    // audio still playing.
+    //
+    // This does not weaken the privacy invariant. The HWND is the one captured
+    // at Start; there is no re-target and no search-by-title, and a window that
+    // has actually gone away (closed(), or no longer a window) is refused here
+    // exactly as it is everywhere else.
+    bool Restart(std::string* error = nullptr);
+
     // Terminal once true: the target window was destroyed. Callers must surface
     // this rather than binding something else.
     bool closed() const;
 
     std::uint64_t frames() const;
+
+    // Frames the FrameArrived handler received but could not forward — a pool
+    // resize, or a failure inside the handler. A stall that shows up here is a
+    // different fault from one that shows no frames arriving at all.
+    std::uint64_t frames_discarded() const;
 
 private:
     struct Impl;

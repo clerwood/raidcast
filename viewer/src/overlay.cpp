@@ -48,6 +48,28 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible, ViewerControls* cont
     ImGui::EndDisabled();
     ImGui::End();
 
+    // A stall is the one fault the picture cannot show you: the last frame just
+    // stays there, audio keeps playing, and every number below still reads
+    // healthy because the link *is* healthy. Say so on screen, without needing
+    // the stats panel open — during a pull nobody is going to go looking.
+    if (s.stalled_for_s > 0) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                       vp->WorkPos.y + vp->WorkSize.y - 16),
+                                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.72f);
+        ImGui::Begin("##stall", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f),
+                           "Picture frozen for %.0fs - the host has stopped sending video.",
+                           s.stalled_for_s);
+        if (s.audio_ok && s.audio_out_db > -119.0f)
+            ImGui::TextDisabled("Audio is still playing, so the connection is fine.");
+        ImGui::End();
+    }
+
     if (!*visible) {
         // Always leave a hint: a viewer who cannot find the diagnostics has no
         // diagnostics.
@@ -81,6 +103,11 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible, ViewerControls* cont
         Row("Retransmits", "%lld", s.pkt_retrans);
         Row("Frames dropped", "%llu", static_cast<unsigned long long>(s.reasm_dropped));
         Row("Bad packets", "%llu", static_cast<unsigned long long>(s.packets_bad));
+        if (s.reconnects > 0) Row("Reconnects", "%d", s.reconnects);
+        // Climbing while the picture stays frozen means the host is not
+        // encoding at all, rather than the viewer having lost a reference
+        // frame - the two look identical on screen.
+        if (s.keyframe_requests > 0) Row("Keyframes asked", "%d", s.keyframe_requests);
         if (s.audio_ok) {
             Row("Audio queue", "%u ms", s.audio_queue_ms);
             const auto level = [](float db) {
@@ -98,7 +125,11 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible, ViewerControls* cont
 
     // The plain-English line: worth more than any individual number at 20:05.
     ImGui::Separator();
-    if (s.fps <= 0)
+    if (s.stalled_for_s > 0)
+        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                           "Video stopped %.0fs ago - the link is up, the host is not sending.",
+                           s.stalled_for_s);
+    else if (s.fps <= 0)
         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f), "No video arriving.");
     else if (s.dropped_recent > 0)
         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),

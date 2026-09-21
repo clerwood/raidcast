@@ -42,6 +42,13 @@ struct HostStatus {
     int           sndbuf_ms  = 0;
     int           srt_latency_ms = 0;
     std::uint64_t frames     = 0;
+
+    // Capture health. WGC can go quiet without closing the session or raising
+    // an error, and when it does the viewer freezes while audio keeps playing —
+    // a fault with no symptom on this end at all unless it is stated here.
+    double        capture_quiet_s   = 0;  // since the last captured frame
+    int           capture_restarts  = 0;  // this session
+    int           keyframe_requests = 0;  // viewers asking for a decodable frame
 };
 
 class HostPanel {

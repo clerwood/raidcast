@@ -42,6 +42,8 @@ bool Presenter::Init(ID3D11Device* device, HWND hwnd, std::uint32_t width,
     device_.copy_from(device);
     w_ = width;
     h_ = height;
+    has_frame_ = false;
+    cb_slice_  = 0xFFFFFFFF;
 
     winrt::com_ptr<ID3DBlob> code, errors;
     if (FAILED(D3DCompile(kShader, sizeof(kShader) - 1, "nv12_to_rgb.hlsl", nullptr, nullptr,
@@ -134,7 +136,17 @@ bool Presenter::Render(ID3D11DeviceContext* ctx, ID3D11Texture2D* nv12,
 
     // One VRAM-to-VRAM copy out of the decoder pool into something samplable.
     ctx->CopySubresourceRegion(scratch_.get(), 0, 0, 0, 0, nv12, slice, nullptr);
+    has_frame_ = true;
 
+    return Dispatch(ctx);
+}
+
+bool Presenter::Repaint(ID3D11DeviceContext* ctx) {
+    if (!swap_ || !scratch_ || !has_frame_) return false;
+    return Dispatch(ctx);
+}
+
+bool Presenter::Dispatch(ID3D11DeviceContext* ctx) {
     if (cb_slice_ != 0) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(cb_.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
@@ -166,6 +178,27 @@ bool Presenter::Swap() {
     // Sync interval 0: present now, tear if we must.
     if (!swap_) return false;
     return SUCCEEDED(swap_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0u));
+}
+
+void Presenter::Reset(ID3D11DeviceContext* ctx) {
+    // Views bound to the backbuffer must go before the swapchain, and the
+    // context must not be holding them either, or DXGI keeps the HWND.
+    if (ctx) {
+        ID3D11RenderTargetView*    no_rtv[] = {nullptr};
+        ID3D11UnorderedAccessView* no_uav[] = {nullptr};
+        ctx->OMSetRenderTargets(1, no_rtv, nullptr);
+        ctx->CSSetUnorderedAccessViews(0, 1, no_uav, nullptr);
+        ctx->Flush();
+    }
+    back_rtv_ = nullptr;
+    back_uav_ = nullptr;
+    swap_     = nullptr;
+    scratch_views_.y  = nullptr;
+    scratch_views_.uv = nullptr;
+    scratch_   = nullptr;
+    has_frame_ = false;
+    cb_slice_  = 0xFFFFFFFF;
+    w_ = h_ = 0;
 }
 
 }  // namespace raidcast

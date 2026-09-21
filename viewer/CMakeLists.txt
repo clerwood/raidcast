@@ -5,6 +5,7 @@ add_executable(raidcast-viewer
     src/audio_player.cpp
     src/overlay.cpp
     src/connect_ui.cpp
+    src/reconnect.cpp
     src/gpu.cpp
 )
 

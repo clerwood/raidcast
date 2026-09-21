@@ -27,6 +27,11 @@ public:
     // Decodes one Opus packet and queues the result for playback.
     bool Push(const std::uint8_t* data, std::size_t len, std::string* error = nullptr);
 
+    // Drops queued audio and resets the Opus decoder, without touching the
+    // output device. Called on reconnect: the queued samples belong to the
+    // session that just ended.
+    void Flush();
+
     // Applied in the render thread, so a change takes effect immediately rather
     // than after the queued audio drains.
     void SetGain(float gain);

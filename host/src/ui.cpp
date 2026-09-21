@@ -86,6 +86,14 @@ HostPanel::Result HostPanel::Draw(const HostStatus& s, UpdateChannel* channel) {
     if (s.capture_lost) {
         ImGui::TextColored(Health(false),
                            "CAPTURE LOST - the target window is gone. Nothing is being sent.");
+    } else if (s.streaming && s.capture_quiet_s >= 2.0) {
+        // The preview above is frozen on the same frame the viewer is stuck on.
+        // Without this line the host has no way to tell that from a calm
+        // moment in the game.
+        ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
+                           "Not capturing (%.0fs) - the viewer's picture is frozen. "
+                           "Click back into WoW.",
+                           s.capture_quiet_s);
     } else if (s.streaming) {
         ImGui::TextColored(Health(true), "Streaming to %s", s.peer.c_str());
     } else {
@@ -134,6 +142,10 @@ HostPanel::Result HostPanel::Draw(const HostStatus& s, UpdateChannel* channel) {
         Row("SRT buffer", "%d ms configured / %d ms queued", s.srt_latency_ms, s.sndbuf_ms);
         Row("Retransmits", "%lld", s.retrans);
         Row("Frames sent", "%llu", static_cast<unsigned long long>(s.frames));
+        // Both are silent-by-default diagnostics: they only appear once the
+        // fault they describe has actually happened.
+        if (s.capture_restarts > 0) Row("Capture restarts", "%d", s.capture_restarts);
+        if (s.keyframe_requests > 0) Row("Keyframes requested", "%d", s.keyframe_requests);
         ImGui::EndTable();
     }
 

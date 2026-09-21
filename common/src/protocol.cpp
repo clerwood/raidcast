@@ -189,6 +189,22 @@ std::optional<Frame> Reassembler::Push(const std::uint8_t* data, std::size_t len
     return std::nullopt;
 }
 
+Datagram MakeControl(ControlType type, std::uint32_t seq) {
+    const std::uint8_t body = static_cast<std::uint8_t>(type);
+    auto dgs = Packetize(Channel::Control, seq, /*pts_us=*/0, &body, 1, /*keyframe=*/false);
+    return std::move(dgs.front());  // one byte never splits
+}
+
+std::optional<ControlType> ParseControl(const Frame& f) {
+    if (f.channel != Channel::Control || f.data.size() != 1) return std::nullopt;
+    switch (f.data[0]) {
+        case static_cast<std::uint8_t>(ControlType::RequestKeyframe):
+            return ControlType::RequestKeyframe;
+        default:
+            return std::nullopt;
+    }
+}
+
 std::string MakeStreamId(std::string_view user, std::uint8_t major) {
     return "raidcast/" + std::to_string(static_cast<int>(major)) +
            ";user=" + std::string(user);

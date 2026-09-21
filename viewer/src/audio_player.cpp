@@ -345,6 +345,19 @@ static bool EnsureResampler(AudioPlayer::Impl* impl, const AVFrame* frame,
     return true;
 }
 
+void AudioPlayer::Flush() {
+    if (!impl_) return;
+
+    // The queue holds the old session's audio and the Opus decoder holds its
+    // state. Playing either across a reconnect means seconds of stale sound
+    // before the new stream is heard, and the render thread is still running
+    // throughout — so drop the queue rather than restarting the device.
+    if (impl_->ctx) avcodec_flush_buffers(impl_->ctx);
+
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->queue.clear();
+}
+
 void AudioPlayer::Close() {
     if (!impl_) return;
 

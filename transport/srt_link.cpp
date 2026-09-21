@@ -57,6 +57,23 @@ bool ApplyCommonOptions(int sock, int latency_ms, std::string* error) {
 
 SrtLink::~SrtLink() { Close(); }
 
+SrtLink::SrtLink(SrtLink&& other) noexcept
+    : listener_(other.listener_), sock_(other.sock_) {
+    other.listener_ = -1;
+    other.sock_     = -1;
+}
+
+SrtLink& SrtLink::operator=(SrtLink&& other) noexcept {
+    if (this != &other) {
+        Close();
+        listener_       = other.listener_;
+        sock_           = other.sock_;
+        other.listener_ = -1;
+        other.sock_     = -1;
+    }
+    return *this;
+}
+
 bool SrtLink::GlobalInit(std::string* error) {
     // SRT logs "no pending connection available at the moment" at ERROR level on
     // every non-blocking accept poll, which buries real problems under hundreds
@@ -215,7 +232,13 @@ int SrtLink::Recv(std::uint8_t* buf, std::size_t cap, int timeout_ms, std::strin
     const int n = srt_recvmsg(sock_, reinterpret_cast<char*>(buf), static_cast<int>(cap));
     if (n != SRT_ERROR) return n;
 
-    if (srt_getlasterror(nullptr) == SRT_ETIMEOUT) return 0;
+    // "Nothing to read yet" arrives under two names depending on how the socket
+    // and the timeout are configured. Both mean wait, not hang up — and a
+    // caller that polls with a very short timeout hits EASYNCRCV, so reading it
+    // as a disconnect would drop a perfectly good viewer.
+    const int e = srt_getlasterror(nullptr);
+    if (e == SRT_ETIMEOUT || e == SRT_EASYNCRCV) return 0;
+
     if (error) *error = std::string("srt_recvmsg: ") + LastErr();
     return -1;
 }

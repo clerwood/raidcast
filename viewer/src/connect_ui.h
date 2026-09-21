@@ -22,6 +22,23 @@ struct ConnectChoice {
     std::string host;
 };
 
+struct ReconnectChoice {
+    bool quit         = false;
+    bool pick_another = false;  // give up on this host, go back to the picker
+};
+
+// The "we lost the stream" banner, shown while a Reconnector retries in the
+// background. Drawn over the last video frame when there is one (`compact`),
+// which keeps the frozen picture visible and says why it is frozen, or as a
+// full panel when the stream never got as far as a frame.
+ReconnectChoice DrawReconnectPanel(const std::string& host, int attempts,
+                                   double seconds_until_retry,
+                                   const std::string& last_error, bool compact);
+
+// Shown between connecting and the first decoded frame. A connected viewer
+// with nothing to show is otherwise indistinguishable from a hung one.
+void DrawWaitingPanel(const std::string& host, double waiting_s);
+
 class ConnectPanel {
 public:
     // Queried once on first draw and then only when the user asks. Peer

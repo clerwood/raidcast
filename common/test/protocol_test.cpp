@@ -152,6 +152,46 @@ void TestStreamId() {
 
 }  // namespace
 
+// The viewer's keyframe request has to survive the same reassembler the media
+// goes through, and a host must not act on anything it does not recognise.
+void TestControl() {
+    const auto dg = MakeControl(ControlType::RequestKeyframe, 7);
+    CHECK(dg.size() <= kMaxPayload);
+
+    Reassembler r;
+    auto        frame = r.Push(dg.data(), dg.size());
+    CHECK(frame);  // one datagram, so it completes immediately
+    CHECK(frame->channel == Channel::Control);
+    CHECK(frame->frame_id == 7);
+
+    const auto msg = ParseControl(*frame);
+    CHECK(msg);
+    CHECK(*msg == ControlType::RequestKeyframe);
+
+    // A control frame from a newer viewer asking for something this host does
+    // not implement is rejected, not silently treated as request #1.
+    Frame unknown;
+    unknown.channel = Channel::Control;
+    unknown.data    = {0xEE};
+    CHECK(!ParseControl(unknown));
+
+    // Media must never be mistaken for a control message.
+    Frame video;
+    video.channel = Channel::Video;
+    video.data    = {static_cast<std::uint8_t>(ControlType::RequestKeyframe)};
+    CHECK(!ParseControl(video));
+
+    // Nor an empty or overlong body.
+    Frame empty;
+    empty.channel = Channel::Control;
+    CHECK(!ParseControl(empty));
+
+    Frame fat;
+    fat.channel = Channel::Control;
+    fat.data    = {1, 1};
+    CHECK(!ParseControl(fat));
+}
+
 int main() {
     TestHeaderRoundTrip();
     TestTruncated();
@@ -165,6 +205,7 @@ int main() {
     TestLossIsDroppedNotStalled();
     TestChannelsAreIndependent();
     TestStreamId();
+    TestControl();
 
     std::puts("protocol tests: OK");
     return 0;

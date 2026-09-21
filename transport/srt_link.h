@@ -34,6 +34,12 @@ public:
     SrtLink(const SrtLink&)            = delete;
     SrtLink& operator=(const SrtLink&) = delete;
 
+    // Movable so a connection made on a worker thread can be handed to the
+    // thread that will stream it. The viewer reconnects that way: srt_connect
+    // blocks for up to CONNTIMEO, which must not stall the window.
+    SrtLink(SrtLink&& other) noexcept;
+    SrtLink& operator=(SrtLink&& other) noexcept;
+
     static bool GlobalInit(std::string* error = nullptr);
     static void GlobalCleanup();
 

@@ -44,4 +44,20 @@ if(RAIDCAST_BUILD_TESTS)
     add_executable(protocol_test common/test/protocol_test.cpp)
     target_link_libraries(protocol_test PRIVATE raidcast_common)
     add_test(NAME protocol COMMAND protocol_test)
+
+    # Needs real SRT sockets, so it only builds where the apps do. Reconnector
+    # is compiled in directly rather than linked from the viewer, which is an
+    # executable; it has no UI dependency precisely so this can happen.
+    if(RAIDCAST_BUILD_APPS)
+        add_executable(link_test
+            transport/test/link_test.cpp
+            viewer/src/reconnect.cpp
+        )
+        target_include_directories(link_test PRIVATE viewer/src)
+        target_link_libraries(link_test PRIVATE raidcast_transport)
+        # Loopback handshakes and deliberate disconnects; SRT takes its time
+        # declaring a peer dead, and the default 1500 s is no use to anyone.
+        add_test(NAME link COMMAND link_test)
+        set_tests_properties(link PROPERTIES TIMEOUT 120)
+    endif()
 endif()

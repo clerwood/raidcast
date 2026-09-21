@@ -136,7 +136,13 @@ struct WindowCapture::Impl {
     FrameCallback         on_frame;
     std::atomic<bool>     closed{false};
     std::atomic<uint64_t> frames{0};
+    std::atomic<uint64_t> discarded{0};
     winrt::Windows::Graphics::SizeInt32 last_size{};
+
+    // Kept so Restart() can rebuild the session against the same window. The
+    // HWND is fixed for the object's lifetime — see the header.
+    HWND                         target{nullptr};
+    winrt::com_ptr<ID3D11Device> d3d;
 };
 
 WindowCapture::WindowCapture() : impl_(std::make_unique<Impl>()) {}
@@ -166,6 +172,8 @@ bool WindowCapture::Start(HWND target,
         impl_->device   = WrapDevice(device);
         impl_->on_frame = std::move(on_frame);
         impl_->last_size = item.Size();
+        impl_->target   = target;
+        impl_->d3d.copy_from(device);
 
         // Free-threaded: frames arrive on a WGC worker thread and we do not
         // need a DispatcherQueue on the calling thread.
@@ -185,30 +193,55 @@ bool WindowCapture::Start(HWND target,
 
         impl_->frame_token = impl_->pool.FrameArrived(
             [this](const wgc::Direct3D11CaptureFramePool& pool, const winrt::Windows::Foundation::IInspectable&) {
-                auto frame = pool.TryGetNextFrame();
-                if (!frame) return;
+                // C++/WinRT turns an escaping exception into a failed HRESULT
+                // that WGC discards, so without this a single throw here is a
+                // capture that silently stops: no error, no Closed event, no
+                // frames. Catch it where it can still be counted.
+                try {
+                    auto frame = pool.TryGetNextFrame();
+                    if (!frame) return;
 
-                const auto size = frame.ContentSize();
-                if (size.Width != impl_->last_size.Width ||
-                    size.Height != impl_->last_size.Height) {
-                    impl_->last_size = size;
-                    pool.Recreate(impl_->device,
-                                  wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                                  2, size);
-                    return;  // this frame's texture is the old size; skip it
+                    const auto size = frame.ContentSize();
+                    if (size.Width != impl_->last_size.Width ||
+                        size.Height != impl_->last_size.Height) {
+                        impl_->discarded.fetch_add(1, std::memory_order_relaxed);
+
+                        // A minimized window reports a degenerate size.
+                        // Recreating the pool at 0x0 throws; recreating it at
+                        // 1x1 wrecks the pool for when the window comes back.
+                        // Neither is worth doing — wait for a real size.
+                        if (size.Width <= 0 || size.Height <= 0) return;
+
+                        // The frame belongs to the pool being replaced, so it
+                        // has to go first. Recreating underneath a live frame
+                        // is what wedges the pool into never raising
+                        // FrameArrived again.
+                        frame.Close();
+
+                        pool.Recreate(impl_->device,
+                                      wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                                      2, size);
+                        // Committed only now: if Recreate threw, last_size must
+                        // still describe the pool that actually exists, or the
+                        // comparison above never fires again.
+                        impl_->last_size = size;
+                        return;  // this frame's texture was the old size
+                    }
+
+                    auto tex = TextureOf(frame.Surface());
+
+                    CaptureFrame cf;
+                    cf.texture     = tex.get();
+                    cf.width       = static_cast<std::uint32_t>(size.Width);
+                    cf.height      = static_cast<std::uint32_t>(size.Height);
+                    cf.content_time_100ns = frame.SystemRelativeTime().count();
+                    cf.arrived_time_100ns = Now100ns();
+
+                    impl_->frames.fetch_add(1, std::memory_order_relaxed);
+                    if (impl_->on_frame) impl_->on_frame(cf);
+                } catch (const winrt::hresult_error&) {
+                    impl_->discarded.fetch_add(1, std::memory_order_relaxed);
                 }
-
-                auto tex = TextureOf(frame.Surface());
-
-                CaptureFrame cf;
-                cf.texture     = tex.get();
-                cf.width       = static_cast<std::uint32_t>(size.Width);
-                cf.height      = static_cast<std::uint32_t>(size.Height);
-                cf.content_time_100ns = frame.SystemRelativeTime().count();
-                cf.arrived_time_100ns = Now100ns();
-
-                impl_->frames.fetch_add(1, std::memory_order_relaxed);
-                if (impl_->on_frame) impl_->on_frame(cf);
             });
 
         // FAIL CLOSED: the window went away. We do not rebind to anything.
@@ -239,12 +272,40 @@ void WindowCapture::Stop() {
     impl_->item    = nullptr;
 }
 
+bool WindowCapture::Restart(std::string* error) {
+    if (!impl_) {
+        if (error) *error = "capture was never started";
+        return false;
+    }
+    // FAIL CLOSED, still: a destroyed window is terminal, and Restart() is not
+    // a way around that.
+    if (impl_->closed.load(std::memory_order_acquire)) {
+        if (error) *error = "the target window has closed";
+        return false;
+    }
+    if (impl_->target == nullptr || !IsWindow(impl_->target)) {
+        if (error) *error = "the target window no longer exists";
+        return false;
+    }
+
+    HWND          target = impl_->target;
+    auto          device = impl_->d3d;
+    FrameCallback cb     = impl_->on_frame;
+
+    Stop();
+    return Start(target, device.get(), std::move(cb), error);
+}
+
 bool WindowCapture::closed() const {
     return impl_ && impl_->closed.load(std::memory_order_acquire);
 }
 
 std::uint64_t WindowCapture::frames() const {
     return impl_ ? impl_->frames.load(std::memory_order_relaxed) : 0;
+}
+
+std::uint64_t WindowCapture::frames_discarded() const {
+    return impl_ ? impl_->discarded.load(std::memory_order_relaxed) : 0;
 }
 
 }  // namespace raidcast

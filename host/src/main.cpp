@@ -514,6 +514,25 @@ int main(int argc, char** argv) {
     std::uint64_t last_bytes = 0, last_frames = 0, last_audio = 0;
     bool          stop_requested = false;
 
+    // Control channel: the viewer's keyframe requests, and nothing else.
+    Reassembler               ctrl_reasm;
+    std::vector<std::uint8_t> ctrl_buf(kMaxPayload * 2);
+
+    // Capture watchdog state. Say something at 2 s — long enough that a
+    // background-throttled WoW at 30 fps never trips it — and rebuild the
+    // capture session at 5 s, by which point it is not coming back on its own.
+    constexpr double kCaptureWarnS    = 2.0;
+    constexpr double kCaptureRestartS = 5.0;
+    std::uint64_t    last_capture_frames = capture.frames();
+    auto             last_capture_at     = start;
+    bool             capture_warned      = false;
+    // A window that is genuinely minimized produces no frames and no amount of
+    // restarting will change that, so stop after a few tries and wait for the
+    // window to come back rather than rebuilding the session every 5 s all
+    // night. Reset by the first frame that arrives.
+    int              restarts_since_frame = 0;
+    constexpr int    kMaxRestartsInARow   = 3;
+
     bool update_announced = false;
 
     while (!stop_requested) {
@@ -534,21 +553,25 @@ int main(int argc, char** argv) {
         if (!connected.load(std::memory_order_acquire) && !capture.closed()) {
             std::string stream_id, peer_addr;
             if (link.Accept(want_ui ? 5 : 250, &stream_id, &peer_addr, nullptr)) {
+                // A caller we refuse costs us that caller, never the session.
+                // These used to end the host outright, which turned one viewer
+                // running a stale build into the raid leader restarting.
                 const auto parsed = ParseStreamId(stream_id);
                 if (!parsed) {
                     LogError("rejected %s: not a RaidCast client\n",
                                  peer_addr.c_str());
-                    break;
+                    link.DropPeer();
+                    continue;
                 }
                 // Protocol compatibility is checked before any media moves, so a
                 // mismatch reads as a sentence rather than a black screen (§12).
                 if (parsed->major != kProtocolMajor) {
-                    std::fprintf(stderr,
-                                 "rejected %s: host protocol v%u, viewer v%u - update the "
-                                 "older end.\n",
-                                 peer_addr.c_str(), static_cast<unsigned>(kProtocolMajor),
-                                 static_cast<unsigned>(parsed->major));
-                    break;
+                    LogError("rejected %s: host protocol v%u, viewer v%u - update the "
+                             "older end.\n",
+                             peer_addr.c_str(), static_cast<unsigned>(kProtocolMajor),
+                             static_cast<unsigned>(parsed->major));
+                    link.DropPeer();
+                    continue;
                 }
                 // The caller's tailnet identity, not the name they claimed in the
                 // stream id, is what authorizes them (DESIGN.md D10).
@@ -575,12 +598,42 @@ int main(int argc, char** argv) {
                                         : (parsed->user.empty() ? std::string("unverified")
                                                                 : parsed->user + " (unverified)")) +
                               " at " + peer_addr;
+                // Each viewer gets its own timebase. Carrying the old one over
+                // means a viewer that reconnects an hour in starts at an hour,
+                // which its fresh decoder and audio clock have no reason to
+                // expect.
+                pts_base.store(0, std::memory_order_release);
                 connected.store(true, std::memory_order_release);
                 // Without this the viewer receives a perfectly healthy stream it
                 // cannot decode until the next safety IDR, up to ten seconds away.
                 enc.RequestKeyframe();
                 Log("viewer connected: %s\n", status.peer.c_str());
                         }
+        }
+
+        // --- the viewer's only upstream traffic -----------------------------
+        // A viewer whose picture has frozen asks for a decodable entry point.
+        // Nothing else is read from this socket, and nothing here touches
+        // anything but the encoder (see the NO INPUT PATH invariant above).
+        if (connected.load(std::memory_order_acquire)) {
+            std::string rerr;
+            const int   n = link.Recv(ctrl_buf.data(), ctrl_buf.size(), 1, &rerr);
+            if (n < 0) {
+                // The viewer is gone. The send path would find this out on its
+                // own within a few seconds; noticing here is just faster.
+                send_failed.store(true, std::memory_order_release);
+            } else if (n > 0) {
+                if (auto frame = ctrl_reasm.Push(ctrl_buf.data(), static_cast<std::size_t>(n))) {
+                    if (const auto msg = ParseControl(*frame)) {
+                        switch (*msg) {
+                            case ControlType::RequestKeyframe:
+                                ++status.keyframe_requests;
+                                enc.RequestKeyframe();
+                                break;
+                        }
+                    }
+                }
+            }
         }
 
         if (capture.closed()) {
@@ -590,8 +643,59 @@ int main(int argc, char** argv) {
         if (send_failed.load(std::memory_order_acquire)) {
             connected.store(false, std::memory_order_release);
             send_failed.store(false, std::memory_order_release);
+            // Without this the dead socket stays open and the next Accept()
+            // overwrites it, leaking it for the rest of the night.
+            link.DropPeer();
             status.peer.clear();
-            Log("viewer disconnected\n");
+            pts_base.store(0, std::memory_order_release);
+            Log("viewer disconnected - waiting for a viewer\n");
+        }
+
+        // --- capture watchdog -----------------------------------------------
+        // WGC stopping without closing the session is the failure that looks
+        // like nothing from here: the preview freezes, audio keeps streaming,
+        // the socket stays up, and every number below carries on reporting the
+        // last good second. Only elapsed time without a captured frame sees it.
+        {
+            const auto now_cap = std::chrono::steady_clock::now();
+            const std::uint64_t seen = capture.frames();
+            if (seen != last_capture_frames) {
+                last_capture_frames  = seen;
+                last_capture_at      = now_cap;
+                capture_warned       = false;
+                restarts_since_frame = 0;
+            }
+            status.capture_quiet_s =
+                std::chrono::duration<double>(now_cap - last_capture_at).count();
+
+            if (!capture.closed() && status.capture_quiet_s >= kCaptureWarnS && !capture_warned) {
+                capture_warned = true;
+                LogError("no frames captured for %.0fs - WoW may have been alt-tabbed away\n",
+                         status.capture_quiet_s);
+            }
+            if (!capture.closed() && status.capture_quiet_s >= kCaptureRestartS &&
+                restarts_since_frame < kMaxRestartsInARow) {
+                std::string cerr;
+                ++restarts_since_frame;
+                if (capture.Restart(&cerr)) {
+                    ++status.capture_restarts;
+                    last_capture_at = now_cap;
+                    capture_warned  = false;
+                    // The viewer has been looking at a frozen frame; give it
+                    // something decodable the moment frames resume.
+                    enc.RequestKeyframe();
+                    Log("capture restarted after %.0fs without a frame (%d/%d)\n",
+                        kCaptureRestartS, restarts_since_frame, kMaxRestartsInARow);
+                    if (restarts_since_frame == kMaxRestartsInARow)
+                        Log("  if this does not help, WoW is minimized or not drawing - "
+                            "click back into it\n");
+                } else {
+                    // Restart refuses once the window is really gone, which is
+                    // the fail-closed path, not a fault.
+                    LogError("capture restart failed: %s\n", cerr.c_str());
+                    last_capture_at = now_cap;  // don't retry every iteration
+                }
+            }
         }
 
         const auto now = std::chrono::steady_clock::now();

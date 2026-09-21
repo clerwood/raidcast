@@ -70,7 +70,13 @@ dynamic ports, so the rule is narrow:
   "acls": [
     // Keep your own devices reaching each other. Adding an "acls" block REPLACES
     // the default allow-all policy, so without this you cut yourself off.
+    //
+    // Note this does NOT cover the host once it is tagged: tagging removes user
+    // ownership, so autogroup:self no longer includes it. Hence the next rule.
     { "action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"] },
+
+    // Your own devices reaching the tagged host.
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["tag:raidcast-host:*"] },
 
     // The viewer reaches RaidCast on the host, and nothing else anywhere.
     {
@@ -78,6 +84,29 @@ dynamic ports, so the rule is narrow:
       "src":    ["raidleader@example.com"],
       "proto":  "udp",
       "dst":    ["tag:raidcast-host:41800"],
+    },
+
+    // ...and the stream flows back. This rule is NOT optional: SRT is UDP, the
+    // host answers from 41800 to whatever ephemeral port the viewer opened, and
+    // there is no handshake for the packet filter to anchor return state on. The
+    // default allow-all policy covered this implicitly; an "acls" block does not.
+    // Omit it and the viewer's connection times out while the forward direction
+    // looks perfectly configured.
+    {
+      "action": "accept",
+      "src":    ["tag:raidcast-host"],
+      "proto":  "udp",
+      "dst":    ["raidleader@example.com:*"],
+    },
+  ],
+
+  // Saved policies are validated against these, so a future edit that breaks the
+  // return path fails in the console instead of on a raid night.
+  "tests": [
+    {
+      "src":    "raidleader@example.com",
+      "proto":  "udp",
+      "accept": ["tag:raidcast-host:41800"],
     },
   ],
 
@@ -90,15 +119,39 @@ Then tag the host: **Machines** → ⋯ → **Edit ACL tags** → `tag:raidcast-
 Tagging rather than naming the device means the rule survives you renaming or
 reinstalling the machine.
 
-Three things that will bite you:
+Four things that will bite you:
 
-1. **`"proto": "udp"` is mandatory.** SRT is UDP. A TCP-only rule blocks
+1. **You need the return rule.** An earlier version of this document omitted it
+   and the viewer timed out, with the forward direction verifiably correct — the
+   host's compiled filter showed `proto=17` from the viewer's node to port 41800,
+   and `tailscale ping` reported a direct 48 ms path. ACLs are enforced on the
+   *receiving* node, so permitting viewer→host says nothing about host→viewer.
+2. **`"proto": "udp"` is mandatory.** SRT is UDP. A TCP-only rule blocks
    everything silently and looks exactly like a broken stream.
-2. **Adding `acls` replaces the default allow-all.** Include the `autogroup:self`
-   rule or you will lock yourself out of your own devices.
-3. **Forwarding UDP 41641 on your router is unrelated.** That is NAT traversal
+3. **Adding `acls` replaces the default allow-all**, and a tagged device is not
+   covered by `autogroup:self` — tagging removes user ownership. Without the
+   `tag:raidcast-host:*` rule you lock *yourself* out of your own host.
+4. **Forwarding UDP 41641 on your router is unrelated.** That is NAT traversal
    between the Tailscale daemons. ACLs govern traffic *inside* the tunnel. You
    may need both.
+
+## Diagnosing a timeout
+
+Work outwards; each step rules out a layer:
+
+```powershell
+# 1. Is the tag actually on this machine? Defining tagOwners does not apply it.
+tailscale status --json | ConvertFrom-Json | % { $_.Self.Tags }
+
+# 2. Is there a path at all, and is it direct? (This bypasses ACLs.)
+tailscale ping <viewer-ip>
+
+# 3. What is the host actually enforcing? Look for proto=17 and port 41800.
+tailscale debug netmap | ConvertFrom-Json | % { $_.PacketFilter }
+```
+
+If all three look right and it still times out, the return path is the remaining
+candidate — which is what rule 4 above exists for.
 
 Use the admin console's editor to save — it validates the policy and flags
 unreachable rules.

@@ -7,8 +7,10 @@ Built for raid leaders who call mechanics from outside the raid: they need to re
 raid frames, debuff stacks and boss timers in near-real-time, and hear boss emotes.
 They do not need to control anything, and they should not see anything that isn't WoW.
 
-> **Status: pre-alpha.** The wire protocol is implemented and tested. The capture,
-> encode, transport and playback pipelines are not yet written.
+> **Status: pre-alpha, but it streams.** Video runs end to end — window capture →
+> NV12 → HEVC → SRT → decode → present — verified against a live WoW client.
+> Not yet built: audio, Tailscale onboarding and identity checks, and the UI.
+> Not yet tested over a real network; only loopback so far.
 
 ## Why not X
 
@@ -68,9 +70,18 @@ cmake --preset common-only && cmake --build --preset common-only && ctest --pres
 
 ```
 common/    wire protocol — framing, packetize/reassemble, stream id. Pure logic.
-host/      WGC capture, WASAPI process loopback, encode, send
-viewer/    receive, decode, present
+transport/ SRT link — host listens, viewer calls
+host/      WGC capture, BGRA->NV12 shader, hardware HEVC encode, send
+viewer/    receive, reassemble, hardware decode, present
+tools/     capture-probe, a diagnostic for the capture and encode stages
 installer/ Inno Setup script
+```
+
+Try it on one machine — run the host, then the viewer:
+
+```sh
+build/windows/host/RelWithDebInfo/raidcast-host.exe --bitrate 25
+build/windows/viewer/RelWithDebInfo/raidcast-viewer.exe --host 127.0.0.1
 ```
 
 ## Releases

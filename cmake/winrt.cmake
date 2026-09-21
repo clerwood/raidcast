@@ -31,6 +31,9 @@ function(raidcast_enable_cppwinrt target)
     endif()
 
     target_include_directories(${target} PRIVATE "${RAIDCAST_CPPWINRT_DIR}")
+    # Even targets that only use winrt::com_ptr pull in hresult_error, which needs
+    # the WinRT runtime at link time.
+    target_link_libraries(${target} PRIVATE windowsapp)
     target_compile_definitions(${target} PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX          # windows.h min/max macros break std::min / std::max

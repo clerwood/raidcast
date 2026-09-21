@@ -39,5 +39,11 @@ target_link_libraries(raidcast-host PRIVATE
 raidcast_enable_cppwinrt(raidcast-host)
 raidcast_stage_runtime(raidcast-host)
 
+# GUI subsystem so double-clicking does not open a console window. /ENTRY keeps
+# main() rather than forcing a WinMain; AttachParentConsole() restores output
+# when the app is launched from a terminal, which --headless relies on.
+set_target_properties(raidcast-host PROPERTIES WIN32_EXECUTABLE TRUE)
+target_link_options(raidcast-host PRIVATE /ENTRY:mainCRTStartup)
+
 install(TARGETS raidcast-host RUNTIME DESTINATION .)
 install(FILES ${RAIDCAST_FFMPEG_DLLS} DESTINATION .)

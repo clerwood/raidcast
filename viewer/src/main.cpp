@@ -17,6 +17,7 @@
 #include "raidcast/protocol.h"
 #include "srt_link.h"
 #include "ui_shell.h"
+#include "log.h"
 #include "settings.h"
 #include "updater.h"
 
@@ -33,8 +34,8 @@
 using namespace raidcast;
 
 int main(int argc, char** argv) {
+    AttachParentConsole();
     SetConsoleOutputCP(CP_UTF8);
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
     // WASAPI and the D3D11VA device both need COM on this thread.
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
         else if (a == "--channel" && i + 1 < argc) channel_override = argv[++i];
     }
 
-    std::printf("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
+    Log("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
 
     winrt::com_ptr<ID3D11Device>        device;
@@ -70,7 +71,7 @@ int main(int argc, char** argv) {
                                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                                  nullptr, 0, D3D11_SDK_VERSION, device.put(), &fl,
                                  context.put()))) {
-        std::fprintf(stderr, "D3D11CreateDevice failed\n");
+        FatalError("D3D11CreateDevice failed\n");
         return 1;
     }
     if (auto mt = device.try_as<ID3D11Multithread>()) mt->SetMultithreadProtected(TRUE);
@@ -78,16 +79,16 @@ int main(int argc, char** argv) {
     std::string err;
     Decoder     dec;
     if (!dec.Open(device.get(), /*hevc=*/true, &err)) {
-        std::fprintf(stderr, "decoder init failed: %s\n", err.c_str());
+        FatalError("decoder init failed: %s\n", err.c_str());
         return 1;
     }
 
     AudioPlayer audio;
     const bool  audio_ok = audio.Open(&err);
-    if (!audio_ok) std::printf("audio unavailable (%s) - video only\n", err.c_str());
+    if (!audio_ok) Log("audio unavailable (%s) - video only\n", err.c_str());
 
     if (!SrtLink::GlobalInit(&err)) {
-        std::fprintf(stderr, "%s\n", err.c_str());
+        FatalError("%s", err.c_str());
         return 1;
     }
 
@@ -102,7 +103,7 @@ int main(int argc, char** argv) {
     if (want_ui) {
         if (!window.Create(L"RaidCast", 720, 520, &err) ||
             !shell.Init(window.hwnd(), device.get(), context.get(), &err)) {
-            std::fprintf(stderr, "UI init failed: %s\n", err.c_str());
+            FatalError("UI init failed: %s\n", err.c_str());
             return 1;
         }
     }
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
     // --- pick a host --------------------------------------------------------
     SrtLink link;
     if (host.empty() && !want_ui) {
-        std::fprintf(stderr, "--host is required with --headless\n");
+        FatalError("--host is required with --headless\n");
         return 1;
     }
 
@@ -124,7 +125,7 @@ int main(int argc, char** argv) {
         bool         connected = false;
 
         if (!connect_swap.Init(device.get(), window.hwnd(), &err)) {
-            std::fprintf(stderr, "UI swapchain failed: %s\n", err.c_str());
+            FatalError("UI swapchain failed: %s\n", err.c_str());
             return 1;
         }
 
@@ -140,7 +141,7 @@ int main(int argc, char** argv) {
             if (choice.channel_changed) {
                 std::string serr;
                 if (!SaveSettings(settings, &serr))
-                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+                    LogError("could not save settings: %s\n", serr.c_str());
             }
             updater.DrawToast();
             shell.RenderTo(context.get(), connect_swap.rtv());
@@ -149,24 +150,24 @@ int main(int argc, char** argv) {
             if (choice.quit) return 0;
             if (!choice.connect) continue;
 
-            std::printf("connecting to %s:%u...\n", choice.host.c_str(), port);
+            Log("connecting to %s:%u...\n", choice.host.c_str(), port);
             if (link.Connect(choice.host, port, latency, MakeStreamId(user), &err)) {
                 host      = choice.host;
                 connected = true;
             } else {
                 last_error = err;
-                std::fprintf(stderr, "%s\n", err.c_str());
+                LogError("%s\n", err.c_str());
             }
         }
         connect_swap.Reset(context.get());
     } else if (!link.Connect(host, port, latency, MakeStreamId(user), &err)) {
-        std::fprintf(stderr, "connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
+        FatalError("connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
         return 1;
     }
 
-    std::printf("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
+    Log("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
     if (!want_ui)
-        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s %9s %9s\n", "t", "frames", "Mbps", "dec p50",
+        Log("\n%-6s %8s %8s %9s %9s %8s %8s %9s %9s\n", "t", "frames", "Mbps", "dec p50",
                     "drops", "rtt ms", "aud ms", "in dBFS", "out dBFS");
 
     // --- stream -------------------------------------------------------------
@@ -193,12 +194,12 @@ int main(int argc, char** argv) {
 
     for (;;) {
         if (want_ui && !window.Pump()) {
-            std::printf("\nwindow closed\n");
+            Log("\nwindow closed\n");
             break;
         }
 
         if (updater.quit_requested()) {
-            std::printf("closing so the installer can replace this version\n");
+            Log("closing so the installer can replace this version\n");
             break;
         }
 
@@ -206,7 +207,7 @@ int main(int argc, char** argv) {
 
         const int n = link.Recv(buf.data(), buf.size(), want_ui ? 4 : 200, &err);
         if (n < 0) {
-            std::printf("\nhost disconnected\n");
+            Log("\nhost disconnected\n");
             break;
         }
         if (n > 0) {
@@ -232,12 +233,12 @@ int main(int argc, char** argv) {
                                        if (presenter.Init(device.get(), window.hwnd(), f.width,
                                                           f.height, &pe)) {
                                            presenter_ready = true;
-                                           std::printf("presenting %ux%u%s\n", f.width,
+                                           Log("presenting %ux%u%s\n", f.width,
                                                        f.height,
                                                        presenter.tearing_allowed()
                                                            ? " (tearing allowed)" : "");
                                        } else {
-                                           std::fprintf(stderr, "present init failed: %s\n",
+                                           LogError("present init failed: %s\n",
                                                         pe.c_str());
                                            return;
                                        }
@@ -282,7 +283,7 @@ int main(int argc, char** argv) {
             last_bytes   = bytes;
 
             if (!want_ui) {
-                std::printf("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u %9.1f %9.1f\n",
+                Log("%5.0fs %8.0f %8.2f %9.2f %9llu %8.2f %8u %9.1f %9.1f\n",
                             std::chrono::duration<double>(now - start).count(), stats.fps,
                             stats.mbps, stats.decode_p50,
                             static_cast<unsigned long long>(stats.reasm_dropped), stats.rtt_ms,
@@ -303,7 +304,7 @@ int main(int argc, char** argv) {
                 settings.muted  = controls.muted;
                 std::string serr;
                 if (!SaveSettings(settings, &serr))
-                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+                    LogError("could not save settings: %s\n", serr.c_str());
             }
             updater.DrawToast();
             shell.RenderTo(context.get(), presenter.rtv());
@@ -313,7 +314,7 @@ int main(int argc, char** argv) {
         if (seconds > 0 && now - start >= std::chrono::seconds(seconds)) break;
     }
 
-    std::printf("\ndecoded %llu frames; reassembly completed %llu, dropped %llu, bad %llu\n",
+    Log("\ndecoded %llu frames; reassembly completed %llu, dropped %llu, bad %llu\n",
                 static_cast<unsigned long long>(decoded),
                 static_cast<unsigned long long>(reasm.frames_completed()),
                 static_cast<unsigned long long>(reasm.frames_dropped()),

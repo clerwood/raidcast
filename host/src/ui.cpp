@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include "log.h"
 #include "updater.h"
 
 #include <imgui.h>
@@ -149,6 +150,9 @@ HostPanel::Result HostPanel::Draw(const HostStatus& s, UpdateChannel* channel) {
         ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
                            "Capture below 60 fps - WoW is probably not the foreground window.");
     }
+
+    ImGui::Spacing();
+    DrawLogPanel("Log", &log_open_, 180.0f);
 
     ImGui::Spacing();
     ImGui::Separator();

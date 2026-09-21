@@ -75,6 +75,13 @@ want; it clamps rather than distorting into noise.
 
 Press **Tab** once connected to show or hide connection stats.
 
+Neither program opens a command prompt. Messages go to a **Log** section inside
+the window, with a **Copy** button — so if something goes wrong you can paste the
+whole thing rather than describe it.
+
+Run either from a terminal and output still appears there, which is what the
+`--check` and `--headless` options are for.
+
 ### Before a raid night
 
 Worth running once on the host machine. It starts capture, audio and the encoder,

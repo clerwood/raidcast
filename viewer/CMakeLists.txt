@@ -21,4 +21,10 @@ target_link_libraries(raidcast-viewer PRIVATE
 raidcast_enable_cppwinrt(raidcast-viewer)
 raidcast_stage_runtime(raidcast-viewer)
 
+# GUI subsystem so double-clicking does not open a console window. /ENTRY keeps
+# main() rather than forcing a WinMain; AttachParentConsole() restores output
+# when the app is launched from a terminal, which --headless relies on.
+set_target_properties(raidcast-viewer PROPERTIES WIN32_EXECUTABLE TRUE)
+target_link_options(raidcast-viewer PRIVATE /ENTRY:mainCRTStartup)
+
 install(TARGETS raidcast-viewer RUNTIME DESTINATION .)

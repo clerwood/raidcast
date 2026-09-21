@@ -1,5 +1,7 @@
 #include "overlay.h"
 
+#include "log.h"
+
 #include <imgui.h>
 
 #include <string>
@@ -106,6 +108,10 @@ void DrawViewerOverlay(const ViewerStats& s, bool* visible, ViewerControls* cont
                            "Recovering lost packets - quality may dip.");
     else
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Healthy.");
+
+    ImGui::Spacing();
+    static bool log_open = false;
+    DrawLogPanel("Log", &log_open, 140.0f);
 
     ImGui::TextDisabled("Tab: hide");
     ImGui::End();

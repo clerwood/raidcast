@@ -74,6 +74,7 @@ private:
     std::size_t        history_pos_  = 0;
     double             last_sample_  = 0;
     std::uint32_t      w_ = 0, h_ = 0;
+    bool               log_open_ = true;
 };
 
 }  // namespace raidcast

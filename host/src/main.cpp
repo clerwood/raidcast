@@ -25,6 +25,7 @@
 #include "tailscale.h"
 #include "ui.h"
 #include "ui_shell.h"
+#include "log.h"
 #include "settings.h"
 #include "updater.h"
 
@@ -98,10 +99,9 @@ double Percentile(std::vector<double>& v, double p) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // No console window of our own; if we were started from one, write there too.
+    AttachParentConsole();
     SetConsoleOutputCP(CP_UTF8);
-    // Unbuffered: when stdout is redirected the default full buffering hides
-    // everything until exit, which is useless for a live status display.
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     Options opt;
     for (int i = 1; i < argc; ++i) {
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
         else if (a == "--update-check") opt.update_check = true;
     }
 
-    std::printf("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
+    Log("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
 
     // Exercises check, download and checksum verification, then stops short of
@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
         Settings st = LoadSettings(RAIDCAST_VERSION);
         if (!opt.channel.empty())
             st.update_channel = ChannelFromString(opt.channel, st.update_channel);
-        std::printf("channel: %s\n", ToString(st.update_channel));
+        Log("channel: %s\n", ToString(st.update_channel));
 
         Updater up;
         up.CheckAsync(RAIDCAST_VERSION, st.update_channel);
@@ -137,25 +137,25 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         if (up.state() != UpdateState::Available) {
-            std::printf("no update offered\n");
+            Log("no update offered\n");
             return 0;
         }
-        std::printf("found %s, downloading...\n", up.latest_version().c_str());
+        Log("found %s, downloading...\n", up.latest_version().c_str());
         up.StartDownload(/*launch_installer=*/false);
 
         int last = -1;
         while (up.state() == UpdateState::Downloading || up.state() == UpdateState::Verifying) {
             if (up.progress_percent() != last && up.progress_percent() % 25 == 0) {
                 last = up.progress_percent();
-                std::printf("  %d%%\n", last);
+                Log("  %d%%\n", last);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (up.state() == UpdateState::Verified) {
-            std::printf("checksum OK -> %s\n", up.downloaded_path().c_str());
+            Log("checksum OK -> %s\n", up.downloaded_path().c_str());
             return 0;
         }
-        std::printf("FAILED\n");
+        Log("FAILED\n");
         return 1;
     }
 
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
             return a.width * a.height < b.width * b.height;
         });
 
-    std::printf("target: %s  %ux%u\n", Narrow(target.exe).c_str(), target.width, target.height);
+    Log("target: %s  %ux%u\n", Narrow(target.exe).c_str(), target.width, target.height);
 
     // --- D3D11 --------------------------------------------------------------
     winrt::com_ptr<ID3D11Device>        device;
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
                                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                                  nullptr, 0, D3D11_SDK_VERSION, device.put(), &fl,
                                  context.put()))) {
-        std::fprintf(stderr, "D3D11CreateDevice failed\n");
+        FatalError("D3D11CreateDevice failed\n");
         return 1;
     }
     // Capture, encode and the UI all touch the immediate context from different
@@ -203,7 +203,7 @@ int main(int argc, char** argv) {
     const std::uint32_t enc_w = target.width & ~1u;
     const std::uint32_t enc_h = target.height & ~1u;
     if (enc_w == 0 || enc_h == 0) {
-        std::fprintf(stderr, "target window is too small to encode (%ux%u)\n", target.width,
+        LogError("target window is too small to encode (%ux%u)\n", target.width,
                      target.height);
         return 1;
     }
@@ -218,14 +218,14 @@ int main(int argc, char** argv) {
 
     std::string err;
     if (!conv.Init(device.get(), enc_w, enc_h, &err)) {
-        std::fprintf(stderr, "colour conversion init failed: %s\n", err.c_str());
+        FatalError("colour conversion init failed: %s\n", err.c_str());
         return 1;
     }
     if (!enc.Open(device.get(), context.get(), ecfg, &err)) {
-        std::fprintf(stderr, "encoder init failed: %s\n", err.c_str());
+        FatalError("encoder init failed: %s\n", err.c_str());
         return 1;
     }
-    std::printf("encoder: %s  %.1f Mbps  %s\n", enc.codec_name(), opt.bitrate / 1e6,
+    Log("encoder: %s  %.1f Mbps  %s\n", enc.codec_name(), opt.bitrate / 1e6,
                 enc.direct_write() ? "direct-to-pool" : "via scratch copy");
 
     // --- readiness check ----------------------------------------------------
@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     // a time when it can still be fixed.
     if (opt.check) {
         const bool capture_ok = CaptureProbeOk(target, device.get());
-        std::printf("  capture  : %s\n", capture_ok ? "ok" : "FAILED");
+        Log("  capture  : %s\n", capture_ok ? "ok" : "FAILED");
 
         // Capturing frames is not the same as capturing sound: process loopback
         // happily returns buffers full of silence, and Opus encodes silence to a
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
                 peak_milli.load() > 0
                     ? 20.0 * std::log10(static_cast<double>(peak_milli.load()) / 1000.0)
                     : -120.0;
-            std::printf("  audio    : ok (%llu frames in 1.5 s, peak %.1f dBFS%s)\n",
+            Log("  audio    : ok (%llu frames in 1.5 s, peak %.1f dBFS%s)\n",
                         static_cast<unsigned long long>(a.frames_captured()), peak_db,
                         saw_silent_flag.load() ? ", SILENT flag seen" : "");
             a.Stop();
@@ -273,61 +273,61 @@ int main(int argc, char** argv) {
                 // Ask Windows directly whether the game is making any sound, so
                 // "the game is silent" and "our capture is broken" stop looking
                 // like the same failure.
-                std::printf("             -> captured only silence. What Windows sees:\n");
+                Log("             -> captured only silence. What Windows sees:\n");
                 bool found_target = false;
                 for (const auto& ses : EnumerateRenderSessions()) {
                     if (ses.pid == 0 && ses.peak == 0.0f) continue;  // system session
                     const bool is_target = ses.pid == target.pid;
                     if (is_target) found_target = true;
-                    std::printf("                %s%-18s peak %5.3f %-8s on %s\n",
+                    Log("                %s%-18s peak %5.3f %-8s on %s\n",
                                 is_target ? "* " : "  ", Narrow(ses.exe).c_str(), ses.peak,
                                 ses.active ? "active" : "inactive",
                                 Narrow(ses.device).c_str());
                 }
                 if (!found_target)
-                    std::printf("                (no audio session for pid %u at all - WoW has\n"
+                    Log("                (no audio session for pid %u at all - WoW has\n"
                                 "                 not opened an audio device)\n", target.pid);
             }
         } else {
-            std::printf("  audio    : FAILED - %s\n", aerr.c_str());
+            Log("  audio    : FAILED - %s\n", aerr.c_str());
         }
-        std::printf("  encoder  : ok (%s)\n", enc.codec_name());
+        Log("  encoder  : ok (%s)\n", enc.codec_name());
 
         const TailStatus ts = QueryStatus();
         if (ts.usable()) {
-            std::printf("  tailscale: ok (%s as %s%s%s)\n", ts.self_name.c_str(),
+            Log("  tailscale: ok (%s as %s%s%s)\n", ts.self_name.c_str(),
                         ts.self_ip.c_str(),
                         ts.self_login.empty() ? "" : ", ",
                         ts.self_login.c_str());
             if (ts.key_expiry_days >= 0)
-                std::printf("             key expires in %d day(s)\n", ts.key_expiry_days);
-            std::printf("             %zu peer(s)\n", ts.peers.size());
+                Log("             key expires in %d day(s)\n", ts.key_expiry_days);
+            Log("             %zu peer(s)\n", ts.peers.size());
             for (const auto& p : ts.peers) {
                 const std::string path =
                     p.relayed ? ("relayed via " + p.relay) : std::string("direct");
-                std::printf("               %-20s %-16s %-8s %s\n", p.name.c_str(),
+                Log("               %-20s %-16s %-8s %s\n", p.name.c_str(),
                             p.ip.c_str(), p.online ? "online" : "offline", path.c_str());
             }
         } else {
-            std::printf("  tailscale: NOT READY (%s)\n", ts.backend_state.c_str());
+            Log("  tailscale: NOT READY (%s)\n", ts.backend_state.c_str());
         }
         if (const auto advice = AdviceFor(ts); !advice.empty())
-            std::printf("             -> %s\n", advice.c_str());
+            Log("             -> %s\n", advice.c_str());
 
         return (capture_ok && audio_ok && ts.usable()) ? 0 : 1;
     }
 
     // --- transport ----------------------------------------------------------
     if (!SrtLink::GlobalInit(&err)) {
-        std::fprintf(stderr, "%s\n", err.c_str());
+        FatalError("%s", err.c_str());
         return 1;
     }
     SrtLink link;
     if (!link.Listen(opt.port, opt.latency, &err)) {
-        std::fprintf(stderr, "listen failed: %s\n", err.c_str());
+        FatalError("listen failed: %s\n", err.c_str());
         return 1;
     }
-    std::printf("listening on UDP %u, SRT latency %d ms - waiting for viewer\n", opt.port,
+    Log("listening on UDP %u, SRT latency %d ms - waiting for viewer\n", opt.port,
                 opt.latency);
 
     // --- shared state -------------------------------------------------------
@@ -350,7 +350,7 @@ int main(int argc, char** argv) {
     const bool want_ui = !opt.headless;
     HostPanel  panel;
     if (want_ui && !panel.Init(device.get(), context.get(), enc_w, enc_h, &err)) {
-        std::fprintf(stderr, "panel init failed: %s\n", err.c_str());
+        FatalError("panel init failed: %s\n", err.c_str());
         return 1;
     }
 
@@ -403,7 +403,7 @@ int main(int argc, char** argv) {
     };
 
     if (!capture.Start(target.hwnd, device.get(), on_frame, &err)) {
-        std::fprintf(stderr, "capture failed: %s\n", err.c_str());
+        FatalError("capture failed: %s\n", err.c_str());
         return 1;
     }
 
@@ -441,11 +441,11 @@ int main(int argc, char** argv) {
                         &ae);
         };
         if (audio.Start(target.pid, on_audio, &err))
-            std::printf("audio: %s process tree, Opus 96 kbps\n", Narrow(target.exe).c_str());
+            Log("audio: %s process tree, Opus 96 kbps\n", Narrow(target.exe).c_str());
         else
-            std::printf("audio unavailable (%s) - continuing without it\n", err.c_str());
+            Log("audio unavailable (%s) - continuing without it\n", err.c_str());
     } else {
-        std::printf("audio encoder unavailable (%s) - continuing without it\n", err.c_str());
+        Log("audio encoder unavailable (%s) - continuing without it\n", err.c_str());
     }
 
     // --- window / UI --------------------------------------------------------
@@ -462,7 +462,7 @@ int main(int argc, char** argv) {
         if (!window.Create(L"RaidCast", 720, 940, &err) ||
             !swapchain.Init(device.get(), window.hwnd(), &err) ||
             !shell.Init(window.hwnd(), device.get(), context.get(), &err)) {
-            std::fprintf(stderr, "UI init failed: %s\n", err.c_str());
+            FatalError("UI init failed: %s\n", err.c_str());
             return 1;
         }
     }
@@ -490,7 +490,7 @@ int main(int argc, char** argv) {
                                                                       : ts.backend_state);
         status.tailnet_advice = AdviceFor(ts);
         if (!status.tailnet_advice.empty())
-            std::printf("tailscale: %s\n", status.tailnet_advice.c_str());
+            Log("tailscale: %s\n", status.tailnet_advice.c_str());
     }
 
     if (opt.allow.empty()) {
@@ -503,10 +503,10 @@ int main(int argc, char** argv) {
         for (std::size_t i = 1; i < opt.allow.size(); ++i)
             status.allow_summary += ", " + opt.allow[i];
     }
-    std::printf("access: %s\n", status.allow_summary.c_str());
+    Log("access: %s\n", status.allow_summary.c_str());
 
     if (!want_ui)
-        std::printf("\n%-6s %6s %8s %8s %9s %8s %9s %9s\n", "t", "fps", "Mbps", "aud kbs",
+        Log("\n%-6s %6s %8s %8s %9s %8s %9s %9s\n", "t", "fps", "Mbps", "aud kbs",
                     "enc p50", "rtt ms", "retrans", "sndbuf ms");
 
     const auto    start = std::chrono::steady_clock::now();
@@ -522,12 +522,12 @@ int main(int argc, char** argv) {
         // Also reported on the console, so a headless run and the logs show it.
         if (!update_announced && updater.state() == UpdateState::Available) {
             update_announced = true;
-            std::printf("update available: %s (channel: %s)\n",
+            Log("update available: %s (channel: %s)\n",
                         updater.latest_version().c_str(), ToString(settings.update_channel));
         }
         // The installer cannot replace an executable that is still running.
         if (updater.quit_requested()) {
-            std::printf("closing so the installer can replace this version\n");
+            Log("closing so the installer can replace this version\n");
             break;
         }
 
@@ -536,7 +536,7 @@ int main(int argc, char** argv) {
             if (link.Accept(want_ui ? 5 : 250, &stream_id, &peer_addr, nullptr)) {
                 const auto parsed = ParseStreamId(stream_id);
                 if (!parsed) {
-                    std::fprintf(stderr, "rejected %s: not a RaidCast client\n",
+                    LogError("rejected %s: not a RaidCast client\n",
                                  peer_addr.c_str());
                     break;
                 }
@@ -560,11 +560,11 @@ int main(int argc, char** argv) {
                         verified && std::find(opt.allow.begin(), opt.allow.end(), *verified) !=
                                         opt.allow.end();
                     if (!permitted) {
-                        std::fprintf(stderr, "rejected %s: %s is not on the allowlist\n",
+                        LogError("rejected %s: %s is not on the allowlist\n",
                                      peer_addr.c_str(),
                                      verified ? verified->c_str() : "unidentified caller");
                         if (!verified)
-                            std::fprintf(stderr, "  (%s)\n", whois_err.c_str());
+                            LogError("  (%s)\n", whois_err.c_str());
                         // One unauthorised caller must not end the session.
                         link.DropPeer();
                         continue;
@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
                 // Without this the viewer receives a perfectly healthy stream it
                 // cannot decode until the next safety IDR, up to ten seconds away.
                 enc.RequestKeyframe();
-                std::printf("viewer connected: %s\n", status.peer.c_str());
+                Log("viewer connected: %s\n", status.peer.c_str());
                         }
         }
 
@@ -591,7 +591,7 @@ int main(int argc, char** argv) {
             connected.store(false, std::memory_order_release);
             send_failed.store(false, std::memory_order_release);
             status.peer.clear();
-            std::printf("viewer disconnected\n");
+            Log("viewer disconnected\n");
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -624,7 +624,7 @@ int main(int argc, char** argv) {
             last_audio = tot_a;
 
             if (!want_ui) {
-                std::printf("%5.0fs %6.0f %8.2f %8.1f %9.2f %8.2f %9lld %9d\n",
+                Log("%5.0fs %6.0f %8.2f %8.1f %9.2f %8.2f %9lld %9d\n",
                             std::chrono::duration<double>(now - start).count(), status.fps,
                             status.mbps, status.audio_kbps, status.enc_p50_ms, status.rtt_ms,
                             static_cast<long long>(status.retrans), status.sndbuf_ms);
@@ -642,7 +642,7 @@ int main(int argc, char** argv) {
             if (panel_result.channel_changed) {
                 std::string serr;
                 if (!SaveSettings(settings, &serr))
-                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+                    LogError("could not save settings: %s\n", serr.c_str());
             }
             updater.DrawToast();
             shell.RenderTo(context.get(), swapchain.rtv());
@@ -656,7 +656,7 @@ int main(int argc, char** argv) {
     }
 
     if (capture.closed())
-        std::printf("\ntarget window closed - capture is terminal (fail closed)\n");
+        Log("\ntarget window closed - capture is terminal (fail closed)\n");
 
     capture.Stop();
     audio.Stop();
@@ -667,7 +667,7 @@ int main(int argc, char** argv) {
         window.Destroy();
     }
 
-    std::printf("sent %llu video frames (%llu packets, %.1f MB) and %llu audio packets\n",
+    Log("sent %llu video frames (%llu packets, %.1f MB) and %llu audio packets\n",
                 static_cast<unsigned long long>(frames.load()),
                 static_cast<unsigned long long>(sent_pkts.load()), bytes.load() / 1e6,
                 static_cast<unsigned long long>(audio_pkts.load()));

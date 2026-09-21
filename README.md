@@ -110,7 +110,17 @@ raidcast-host.exe --allow them@example.com
 ```
 
 The host verifies callers with `tailscale whois`, so this checks who they actually
-are rather than what they claim. If you are inviting someone to your tailnet just
+are rather than what they claim.
+
+### Update channel
+
+Both windows have an **Updates** setting: *Stable only* or *Include betas*. While
+RaidCast is pre-1.0 every release is a beta, so a fresh install defaults to
+*Include betas* — otherwise it would never find an update. Change it once and it
+sticks, in `%APPDATA%\RaidCast\settings.json`.
+
+`--channel stable` or `--channel beta` overrides it for one run without changing
+the saved setting. If you are inviting someone to your tailnet just
 for this, [docs/SECURITY.md](docs/SECURITY.md) covers locking their access down to
 RaidCast alone.
 

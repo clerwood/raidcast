@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "settings.h"
+
 #include <d3d11.h>
 #include <winrt/base.h>
 
@@ -50,8 +52,13 @@ public:
     // Called from the capture thread with the frame currently being encoded.
     void UpdatePreview(ID3D11Texture2D* bgra);
 
-    // Draws the panel. Returns true if the user asked to stop streaming.
-    bool Draw(const HostStatus& s);
+    struct Result {
+        bool stop            = false;
+        bool channel_changed = false;  // caller should persist the new value
+    };
+
+    // Draws the panel. `channel` is edited in place when the user changes it.
+    Result Draw(const HostStatus& s, UpdateChannel* channel);
 
 private:
     void PushHistory(const HostStatus& s);

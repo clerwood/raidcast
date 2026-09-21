@@ -1,5 +1,7 @@
 #include "connect_ui.h"
 
+#include "updater.h"
+
 #include <imgui.h>
 
 #include <cstdio>
@@ -31,7 +33,7 @@ void ConnectPanel::Refresh() {
     if (online_count == 1) selected_ = last_online;
 }
 
-ConnectChoice ConnectPanel::Draw(const std::string& last_error) {
+ConnectChoice ConnectPanel::Draw(UpdateChannel* channel, const std::string& last_error) {
     if (!queried_) Refresh();
 
     ConnectChoice choice;
@@ -135,6 +137,10 @@ ConnectChoice ConnectPanel::Draw(const std::string& last_error) {
 
     ImGui::SameLine();
     if (ImGui::Button("Quit", ImVec2(80, 0))) choice.quit = true;
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (DrawUpdateChannelCombo(channel)) choice.channel_changed = true;
 
     ImGui::End();
     return choice;

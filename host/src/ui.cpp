@@ -1,5 +1,7 @@
 #include "ui.h"
 
+#include "updater.h"
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -67,9 +69,9 @@ void HostPanel::PushHistory(const HostStatus& s) {
     history_pos_ = (history_pos_ + 1) % mbps_history_.size();
 }
 
-bool HostPanel::Draw(const HostStatus& s) {
+HostPanel::Result HostPanel::Draw(const HostStatus& s, UpdateChannel* channel) {
     PushHistory(s);
-    bool stop = false;
+    Result result;
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -89,7 +91,7 @@ bool HostPanel::Draw(const HostStatus& s) {
         ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f), "Waiting for viewer...");
     }
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90.0f);
-    if (ImGui::Button("Stop", ImVec2(80, 0))) stop = true;
+    if (ImGui::Button("Stop", ImVec2(80, 0))) result.stop = true;
 
     // Tailscale state sits above the preview because when it is wrong, nothing
     // below it matters.
@@ -148,8 +150,12 @@ bool HostPanel::Draw(const HostStatus& s) {
                            "Capture below 60 fps - WoW is probably not the foreground window.");
     }
 
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (DrawUpdateChannelCombo(channel)) result.channel_changed = true;
+
     ImGui::End();
-    return stop;
+    return result;
 }
 
 }  // namespace raidcast

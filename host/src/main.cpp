@@ -25,6 +25,7 @@
 #include "tailscale.h"
 #include "ui.h"
 #include "ui_shell.h"
+#include "settings.h"
 #include "updater.h"
 
 #include <winrt/base.h>
@@ -54,6 +55,8 @@ struct Options {
     bool          headless = false;
     // Permitted tailnet logins. Empty means any tailnet member may connect.
     std::vector<std::string> allow;
+    // Session-only override of the saved update channel; does not persist.
+    std::string channel;
 };
 
 std::wstring Widen(const char* s) {
@@ -110,6 +113,7 @@ int main(int argc, char** argv) {
         else if (a == "--check") opt.check = true;
         else if (a == "--headless") opt.headless = true;
         else if (a == "--allow" && i + 1 < argc) opt.allow.push_back(argv[++i]);
+        else if (a == "--channel" && i + 1 < argc) opt.channel = argv[++i];
     }
 
     std::printf("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
@@ -355,6 +359,10 @@ int main(int argc, char** argv) {
     ImGuiShell  shell;
     Updater     updater;
 
+    Settings settings = LoadSettings(RAIDCAST_VERSION);
+    if (!opt.channel.empty())
+        settings.update_channel = ChannelFromString(opt.channel, settings.update_channel);
+
     if (want_ui) {
         if (!window.Create(L"RaidCast", 720, 940, &err) ||
             !swapchain.Init(device.get(), window.hwnd(), &err) ||
@@ -362,11 +370,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "UI init failed: %s\n", err.c_str());
             return 1;
         }
-        updater.CheckAsync(RAIDCAST_VERSION);
-    } else {
-        std::printf("\n%-6s %6s %8s %8s %9s %8s %9s %9s\n", "t", "fps", "Mbps", "aud kbs",
-                    "enc p50", "rtt ms", "retrans", "sndbuf ms");
     }
+
+    // Checked regardless of the UI: headless runs report it on the console, which
+    // is what logs and scripted tests can see.
+    updater.CheckAsync(RAIDCAST_VERSION, settings.update_channel);
 
     // --- run ----------------------------------------------------------------
     HostStatus status;
@@ -402,13 +410,26 @@ int main(int argc, char** argv) {
     }
     std::printf("access: %s\n", status.allow_summary.c_str());
 
+    if (!want_ui)
+        std::printf("\n%-6s %6s %8s %8s %9s %8s %9s %9s\n", "t", "fps", "Mbps", "aud kbs",
+                    "enc p50", "rtt ms", "retrans", "sndbuf ms");
+
     const auto    start = std::chrono::steady_clock::now();
     auto          next  = start + std::chrono::seconds(1);
     std::uint64_t last_bytes = 0, last_frames = 0, last_audio = 0;
     bool          stop_requested = false;
 
+    bool update_announced = false;
+
     while (!stop_requested) {
         if (want_ui && !window.Pump()) break;
+
+        // Also reported on the console, so a headless run and the logs show it.
+        if (!update_announced && updater.update_available()) {
+            update_announced = true;
+            std::printf("update available: %s (channel: %s)\n",
+                        updater.latest_version().c_str(), ToString(settings.update_channel));
+        }
 
         if (!connected.load(std::memory_order_acquire) && !capture.closed()) {
             std::string stream_id, peer_addr;
@@ -516,7 +537,13 @@ int main(int argc, char** argv) {
             swapchain.ResizeIfNeeded(w, h);
 
             shell.NewFrame();
-            stop_requested = panel.Draw(status);
+            const auto panel_result = panel.Draw(status, &settings.update_channel);
+            stop_requested = panel_result.stop;
+            if (panel_result.channel_changed) {
+                std::string serr;
+                if (!SaveSettings(settings, &serr))
+                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+            }
             updater.DrawToast();
             shell.RenderTo(context.get(), swapchain.rtv());
             swapchain.Present();

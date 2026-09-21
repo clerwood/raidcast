@@ -17,6 +17,7 @@
 #include "raidcast/protocol.h"
 #include "srt_link.h"
 #include "ui_shell.h"
+#include "settings.h"
 #include "updater.h"
 
 #include <winrt/base.h>
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
     int           seconds  = 0;
     std::string   user     = "viewer";
     bool          headless = false;
+    std::string   channel_override;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -53,6 +55,8 @@ int main(int argc, char** argv) {
         else if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--user" && i + 1 < argc) user = argv[++i];
         else if (a == "--headless") headless = true;
+        // Session-only override of the saved update channel; does not persist.
+        else if (a == "--channel" && i + 1 < argc) channel_override = argv[++i];
     }
 
     std::printf("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
@@ -87,6 +91,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    Settings settings = LoadSettings(RAIDCAST_VERSION);
+    if (!channel_override.empty())
+        settings.update_channel = ChannelFromString(channel_override, settings.update_channel);
+
     const bool want_ui = !headless;
     AppWindow  window;
     ImGuiShell shell;
@@ -97,8 +105,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "UI init failed: %s\n", err.c_str());
             return 1;
         }
-        updater.CheckAsync(RAIDCAST_VERSION);
     }
+    updater.CheckAsync(RAIDCAST_VERSION, settings.update_channel);
 
     // --- pick a host --------------------------------------------------------
     SrtLink link;
@@ -128,7 +136,12 @@ int main(int argc, char** argv) {
             connect_swap.ResizeIfNeeded(w, h);
 
             shell.NewFrame();
-            const ConnectChoice choice = panel.Draw(last_error);
+            const ConnectChoice choice = panel.Draw(&settings.update_channel, last_error);
+            if (choice.channel_changed) {
+                std::string serr;
+                if (!SaveSettings(settings, &serr))
+                    std::fprintf(stderr, "could not save settings: %s\n", serr.c_str());
+            }
             updater.DrawToast();
             shell.RenderTo(context.get(), connect_swap.rtv());
             connect_swap.Present();

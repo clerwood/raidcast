@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "settings.h"
 #include "tailscale.h"
 
 #include <string>
@@ -15,8 +16,9 @@
 namespace raidcast {
 
 struct ConnectChoice {
-    bool        connect = false;
-    bool        quit    = false;
+    bool        connect         = false;
+    bool        quit            = false;
+    bool        channel_changed = false;  // caller should persist the new value
     std::string host;
 };
 
@@ -27,7 +29,7 @@ public:
     // to spawn a subprocess every few seconds.
     void Refresh();
 
-    ConnectChoice Draw(const std::string& last_error = {});
+    ConnectChoice Draw(UpdateChannel* channel, const std::string& last_error = {});
 
 private:
     TailStatus status_;

@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "settings.h"
+
 #include <atomic>
 #include <memory>
 #include <string>
@@ -22,7 +24,7 @@ public:
 
     // Fires off a background check. Never blocks, never throws, and failing to
     // reach GitHub is not an error the user needs to hear about.
-    void CheckAsync(const std::string& current_version);
+    void CheckAsync(const std::string& current_version, UpdateChannel channel);
 
     // Draws the notification if one is pending. Call inside an ImGui frame.
     void DrawToast();
@@ -34,6 +36,10 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Combo box for the update channel. Returns true when the user changed it, so
+// the caller can persist the choice.
+bool DrawUpdateChannelCombo(UpdateChannel* channel);
 
 // Exposed for testing: true when `latest` is newer than `current`.
 // Both are dotted numeric versions, with or without a leading "v".

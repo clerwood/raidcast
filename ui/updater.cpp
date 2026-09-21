@@ -5,7 +5,10 @@
 #include <shellapi.h>
 
 #include <imgui.h>
+#include <nlohmann/json.hpp>
 
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -35,19 +38,6 @@ std::vector<int> ParseVersion(const std::string& v) {
         }
     }
     return parts;
-}
-
-// Pulls one string field out of a JSON blob without taking a JSON dependency.
-// Deliberately crude: the only inputs are GitHub's own release payloads, and
-// the failure mode is "no update offered", which is safe.
-std::string JsonString(const std::string& body, const std::string& key) {
-    const std::string needle = "\"" + key + "\":\"";
-    const auto        at     = body.find(needle);
-    if (at == std::string::npos) return {};
-    const auto start = at + needle.size();
-    const auto end   = body.find('"', start);
-    if (end == std::string::npos) return {};
-    return body.substr(start, end - start);
 }
 
 std::wstring Widen(const std::string& s) {
@@ -124,22 +114,53 @@ std::string Updater::latest_version() const {
     return impl_->latest;
 }
 
-void Updater::CheckAsync(const std::string& current_version) {
+void Updater::CheckAsync(const std::string& current_version, UpdateChannel channel) {
     if (impl_->worker.joinable()) return;
 
-    impl_->worker = std::thread([this, current_version] {
-        // RAIDCAST_REPO is a narrow macro, so the path is assembled at runtime
-        // rather than by literal concatenation.
-        const std::wstring path = L"/repos/" + Widen(RAIDCAST_REPO) + L"/releases/latest";
-        const std::string  body = HttpsGet(L"api.github.com", path.c_str());
+    impl_->worker = std::thread([this, current_version, channel] {
+        // Deliberately NOT /releases/latest: that endpoint excludes pre-releases,
+        // so while every 0.x tag ships as a pre-release it returns 404 and no
+        // update is ever offered. List releases and choose ourselves.
+        //
+        // RAIDCAST_REPO is a narrow macro, so the path is built at runtime rather
+        // than by literal concatenation.
+        const std::wstring path =
+            L"/repos/" + Widen(RAIDCAST_REPO) + L"/releases?per_page=20";
+        const std::string body = HttpsGet(L"api.github.com", path.c_str());
+        if (const char* dbg = std::getenv("RAIDCAST_UPDATE_DEBUG"); dbg && *dbg) {
+            std::fprintf(stderr, "[update] %zu bytes: %.200s\n", body.size(), body.c_str());
+        }
         if (body.empty()) return;
 
-        const std::string tag = JsonString(body, "tag_name");
-        if (tag.empty() || !IsNewerVersion(tag, current_version)) return;
+        const bool accept_prerelease = channel == UpdateChannel::Beta;
+
+        std::string best_tag, best_url;
+        try {
+            const auto releases = nlohmann::json::parse(body);
+            if (!releases.is_array()) return;
+
+            for (const auto& rel : releases) {
+                if (!rel.is_object()) continue;
+                if (rel.value("draft", false)) continue;
+                if (rel.value("prerelease", false) && !accept_prerelease) continue;
+
+                const auto tag = rel.value("tag_name", std::string{});
+                if (tag.empty()) continue;
+                if (!IsNewerVersion(tag, current_version)) continue;
+                // Do not trust the array order; keep the highest version seen.
+                if (!best_tag.empty() && !IsNewerVersion(tag, best_tag)) continue;
+
+                best_tag = tag;
+                best_url = rel.value("html_url", std::string{});
+            }
+        } catch (const std::exception&) {
+            return;  // a malformed reply is not worth telling the user about
+        }
+        if (best_tag.empty()) return;
 
         std::lock_guard<std::mutex> lock(impl_->mu);
-        impl_->latest   = tag;
-        impl_->page_url = JsonString(body, "html_url");
+        impl_->latest   = best_tag;
+        impl_->page_url = best_url;
         impl_->available.store(true, std::memory_order_release);
     });
 }
@@ -180,6 +201,23 @@ void Updater::DrawToast() {
     if (ImGui::Button("Later")) impl_->dismissed = true;
 
     ImGui::End();
+}
+
+bool DrawUpdateChannelCombo(UpdateChannel* channel) {
+    if (channel == nullptr) return false;
+
+    static const char* kLabels[] = {"Stable only", "Include betas"};
+    int current = *channel == UpdateChannel::Beta ? 1 : 0;
+
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::Combo("Updates", &current, kLabels, 2)) {
+        const auto chosen = current == 1 ? UpdateChannel::Beta : UpdateChannel::Stable;
+        if (chosen != *channel) {
+            *channel = chosen;
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace raidcast

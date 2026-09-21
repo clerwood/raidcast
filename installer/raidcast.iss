@@ -35,6 +35,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 LicenseFile=..\LICENSE
+SetupIconFile=..\assets\raidcast.ico
+UninstallDisplayIcon={app}\raidcast-viewer.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -28,6 +28,13 @@ bool AppWindow::Create(const wchar_t* title, int width, int height, std::string*
     wc.hInstance     = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"RaidCastWindow";
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    // Resource 1 from assets/raidcast.rc. Without setting these the window gets
+    // the generic default even though the .exe itself shows the right icon.
+    wc.hIcon   = static_cast<HICON>(LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                               0, 0, LR_DEFAULTSIZE));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), 0));
     RegisterClassExW(&wc);
 
     RECT want{0, 0, width, height};

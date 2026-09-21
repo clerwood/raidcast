@@ -24,6 +24,7 @@ raidcast_stage_runtime(raidcast-viewer)
 # GUI subsystem so double-clicking does not open a console window. /ENTRY keeps
 # main() rather than forcing a WinMain; AttachParentConsole() restores output
 # when the app is launched from a terminal, which --headless relies on.
+target_sources(raidcast-viewer PRIVATE ${CMAKE_SOURCE_DIR}/assets/raidcast.rc)
 set_target_properties(raidcast-viewer PROPERTIES WIN32_EXECUTABLE TRUE)
 target_link_options(raidcast-viewer PRIVATE /ENTRY:mainCRTStartup)
 

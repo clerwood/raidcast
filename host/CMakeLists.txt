@@ -3,7 +3,7 @@
 add_library(raidcast_capture STATIC
     src/capture_wgc.cpp
     src/convert_nv12.cpp
-    # TODO: audio_loopback.cpp — WASAPI process loopback on Wow.exe (D4)
+    src/audio_loopback.cpp
 )
 
 target_include_directories(raidcast_capture PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -18,7 +18,7 @@ target_link_libraries(raidcast_capture PUBLIC
 raidcast_enable_cppwinrt(raidcast_capture)
 
 # Encoding is split out so the capture library stays free of the FFmpeg dependency.
-add_library(raidcast_encode STATIC src/encoder.cpp)
+add_library(raidcast_encode STATIC src/encoder.cpp src/audio_encoder.cpp)
 target_include_directories(raidcast_encode PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raidcast_encode PUBLIC raidcast_common ffmpeg d3d11)
 
@@ -32,7 +32,7 @@ target_link_libraries(raidcast-host PRIVATE
     raidcast_encode
     raidcast_transport
     imgui
-    mmdevapi       # WASAPI
+    mmdevapi       # WASAPI process loopback
 )
 
 raidcast_stage_runtime(raidcast-host)

@@ -14,6 +14,8 @@
 //   2. NO INPUT PATH. Nothing here ever synthesizes input on the host. C5 is
 //      satisfied structurally, by the absence of the code, not by a flag.
 
+#include "audio_encoder.h"
+#include "audio_loopback.h"
 #include "capture_wgc.h"
 #include "convert_nv12.h"
 #include "encoder.h"
@@ -30,6 +32,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace raidcast;
@@ -42,6 +45,7 @@ struct Options {
     std::uint32_t bitrate = 25'000'000;
     int           latency = 60;   // SRT buffer, ms; ~3x RTT with a 40 ms floor
     int           seconds = 0;    // 0 = until the target window closes
+    bool          check   = false;  // initialise everything, report, exit
 };
 
 std::wstring Widen(const char* s) {
@@ -58,10 +62,25 @@ std::string Narrow(const std::wstring& w) {
     return s;
 }
 
+// Starts and immediately stops a capture, to prove the target is capturable
+// before anything downstream is blamed for a black screen.
+bool capture_probe_ok(const WindowInfo& target, ID3D11Device* device) {
+    WindowCapture c;
+    std::string   e;
+    if (!c.Start(target.hwnd, device, [](const CaptureFrame&) {}, &e)) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    const bool got = c.frames() > 0;
+    c.Stop();
+    return got;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
+    // Unbuffered: when stdout is redirected to a file the default full buffering
+    // hides everything until exit, which is useless for a live status display.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     Options opt;
     for (int i = 1; i < argc; ++i) {
@@ -73,6 +92,7 @@ int main(int argc, char** argv) {
             opt.bitrate = static_cast<std::uint32_t>(std::atof(argv[++i]) * 1e6);
         else if (a == "--latency" && i + 1 < argc) opt.latency = std::atoi(argv[++i]);
         else if (a == "--seconds" && i + 1 < argc) opt.seconds = std::atoi(argv[++i]);
+        else if (a == "--check") opt.check = true;
     }
 
     std::printf("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
@@ -133,6 +153,32 @@ int main(int argc, char** argv) {
     std::printf("encoder: %s  %.1f Mbps  %s\n", enc.codec_name(), opt.bitrate / 1e6,
                 enc.direct_write() ? "direct-to-pool" : "via scratch copy");
 
+    // --- readiness check ----------------------------------------------------
+    // Brings up every subsystem, says what works, and exits without waiting for
+    // a viewer. This is the first-run diagnostic: everything that can fail on a
+    // raid night fails here instead, at a time when it can be fixed.
+    if (opt.check) {
+        bool capture_ok = capture_probe_ok(target, device.get());
+        std::printf("  capture  : %s\n", capture_ok ? "ok" : "FAILED");
+
+        AudioLoopback a;
+        AudioEncoder  ae;
+        std::string   aerr;
+        bool audio_ok = ae.Open(96'000, &aerr) &&
+                        a.Start(target.pid, [](const AudioChunk&) {}, &aerr);
+        if (audio_ok) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+            std::printf("  audio    : ok (%llu frames captured in 600 ms)\n",
+                        static_cast<unsigned long long>(a.frames_captured()));
+            a.Stop();
+        } else {
+            std::printf("  audio    : FAILED — %s\n", aerr.c_str());
+        }
+
+        std::printf("  encoder  : ok (%s)\n", enc.codec_name());
+        return (capture_ok && audio_ok) ? 0 : 1;
+    }
+
     // --- wait for the viewer ------------------------------------------------
     if (!SrtLink::GlobalInit(&err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
@@ -174,20 +220,29 @@ int main(int argc, char** argv) {
     // allowlist before accepting (DESIGN.md D10).
 
     // --- stream -------------------------------------------------------------
-    std::mutex          mu;
+    // Counters are atomic rather than mutex-guarded on purpose. The video thread
+    // and the audio thread both produce stats and both send, and an earlier
+    // version took the stats lock and the send lock in opposite orders on those
+    // two paths — a deadlock that only appeared once audio was enabled. With one
+    // lock (the socket) there is no order to get wrong.
+    std::mutex          stats_mu;  // guards encode_ms only
+    std::mutex          send_mu;   // serialises the socket across A/V threads
     std::vector<double> encode_ms;
-    std::uint64_t       bytes = 0, frames = 0, sent_pkts = 0;
-    std::atomic<bool>   send_failed{false};
-    std::int64_t        pts_base = 0;
-    std::uint32_t       frame_id = 0;
+
+    std::atomic<std::uint64_t> bytes{0}, frames{0}, sent_pkts{0};
+    std::atomic<std::uint64_t> audio_bytes{0}, audio_pkts{0};
+    std::atomic<bool>          send_failed{false};
+    std::atomic<std::int64_t>  pts_base{0};
+    std::uint32_t              frame_id = 0;  // video thread only
 
     WindowCapture capture;
     auto on_frame = [&](const CaptureFrame& f) {
-        std::lock_guard<std::mutex> lock(mu);
         if (send_failed.load(std::memory_order_acquire)) return;
 
-        if (pts_base == 0) pts_base = f.content_time_100ns;
-        const std::int64_t pts_us = (f.content_time_100ns - pts_base) / 10;
+        if (pts_base.load(std::memory_order_acquire) == 0)
+            pts_base.store(f.content_time_100ns, std::memory_order_release);
+        const std::int64_t pts_us =
+            (f.content_time_100ns - pts_base.load(std::memory_order_acquire)) / 10;
 
         ID3D11Texture2D* dst   = nullptr;
         std::uint32_t    slice = 0;
@@ -200,22 +255,27 @@ int main(int argc, char** argv) {
 
         const std::uint32_t id = frame_id++;
         if (!enc.EndFrame(pts_us, [&](const EncodedPacket& p) {
-                for (const auto& dg : Packetize(Channel::Video, id, static_cast<std::uint64_t>(p.pts_us),
-                                                p.data, p.size, p.keyframe)) {
+                const auto dgs = Packetize(Channel::Video, id,
+                                           static_cast<std::uint64_t>(p.pts_us), p.data,
+                                           p.size, p.keyframe);
+                std::lock_guard<std::mutex> send_lock(send_mu);
+                for (const auto& dg : dgs) {
                     if (!link.Send(dg.data(), dg.size(), &e)) {
                         send_failed.store(true, std::memory_order_release);
                         return;
                     }
-                    ++sent_pkts;
+                    sent_pkts.fetch_add(1, std::memory_order_relaxed);
                 }
-                bytes += p.size;
-                ++frames;
+                bytes.fetch_add(p.size, std::memory_order_relaxed);
+                frames.fetch_add(1, std::memory_order_relaxed);
             }, &e)) {
             return;
         }
-        encode_ms.push_back(
+        const double ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-                .count());
+                .count();
+        std::lock_guard<std::mutex> lock(stats_mu);
+        encode_ms.push_back(ms);
     };
 
     if (!capture.Start(target.hwnd, device.get(), on_frame, &err)) {
@@ -223,12 +283,51 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("%-6s %6s %8s %9s %8s %9s %9s\n",
-                "t", "fps", "Mbps", "enc p50", "rtt ms", "retrans", "sndbuf ms");
+    // --- audio: the WoW process tree only, never the endpoint mix (D4) -------
+    AudioLoopback audio;
+    AudioEncoder  aenc;
+    std::uint32_t audio_frame_id = 0;
+
+    if (aenc.Open(96'000, &err)) {
+        auto on_audio = [&](const AudioChunk& chunk) {
+            if (send_failed.load(std::memory_order_acquire)) return;
+            const std::int64_t base = pts_base.load(std::memory_order_acquire);
+            if (base == 0) return;  // wait for video to establish the timebase
+
+            const std::int64_t pts_us = (chunk.qpc_100ns - base) / 10;
+            std::string        ae;
+            aenc.Submit(chunk.samples, chunk.frames, pts_us,
+                        [&](const EncodedAudio& a) {
+                            const auto dgs =
+                                Packetize(Channel::Audio, audio_frame_id++,
+                                          static_cast<std::uint64_t>(a.pts_us), a.data,
+                                          a.size, false);
+                            std::lock_guard<std::mutex> send_lock(send_mu);
+                            for (const auto& dg : dgs) {
+                                if (!link.Send(dg.data(), dg.size(), &ae)) {
+                                    send_failed.store(true, std::memory_order_release);
+                                    return;
+                                }
+                                audio_pkts.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            audio_bytes.fetch_add(a.size, std::memory_order_relaxed);
+                        },
+                        &ae);
+        };
+        if (audio.Start(target.pid, on_audio, &err))
+            std::printf("audio: %s process tree, Opus 96 kbps\n", Narrow(target.exe).c_str());
+        else
+            std::printf("audio unavailable (%s) — continuing without it\n", err.c_str());
+    } else {
+        std::printf("audio encoder unavailable (%s) — continuing without it\n", err.c_str());
+    }
+
+    std::printf("\n%-6s %6s %8s %8s %9s %8s %9s %9s\n",
+                "t", "fps", "Mbps", "aud kbs", "enc p50", "rtt ms", "retrans", "sndbuf ms");
 
     const auto start = std::chrono::steady_clock::now();
     auto       next  = start + std::chrono::seconds(1);
-    std::uint64_t last_bytes = 0, last_frames = 0;
+    std::uint64_t last_bytes = 0, last_frames = 0, last_audio = 0;
 
     while (!capture.closed() && !send_failed.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -241,19 +340,22 @@ int main(int argc, char** argv) {
         next += std::chrono::seconds(1);
 
         std::vector<double> enc_ms;
-        std::uint64_t       b = 0, fr = 0;
         {
-            std::lock_guard<std::mutex> lock(mu);
+            std::lock_guard<std::mutex> lock(stats_mu);
             enc_ms.swap(encode_ms);
-            b  = bytes - last_bytes;   last_bytes  = bytes;
-            fr = frames - last_frames; last_frames = frames;
         }
+        const std::uint64_t tot_b = bytes.load(std::memory_order_relaxed);
+        const std::uint64_t tot_f = frames.load(std::memory_order_relaxed);
+        const std::uint64_t tot_a = audio_bytes.load(std::memory_order_relaxed);
+        const std::uint64_t b  = tot_b - last_bytes;  last_bytes  = tot_b;
+        const std::uint64_t fr = tot_f - last_frames; last_frames = tot_f;
+        const std::uint64_t ab = tot_a - last_audio;  last_audio  = tot_a;
         std::sort(enc_ms.begin(), enc_ms.end());
         const auto st = link.Stats();
 
-        std::printf("%5.0fs %6llu %8.2f %9.2f %8.2f %9lld %9d\n",
+        std::printf("%5.0fs %6llu %8.2f %8.1f %9.2f %8.2f %9lld %9d\n",
                     std::chrono::duration<double>(now - start).count(),
-                    static_cast<unsigned long long>(fr), b * 8.0 / 1e6,
+                    static_cast<unsigned long long>(fr), b * 8.0 / 1e6, ab * 8.0 / 1e3,
                     enc_ms.empty() ? 0.0 : enc_ms[enc_ms.size() / 2],
                     st.rtt_ms, static_cast<long long>(st.pkt_retrans), st.send_buf_ms);
 
@@ -266,10 +368,12 @@ int main(int argc, char** argv) {
         std::printf("\nviewer disconnected\n");
 
     capture.Stop();
+    audio.Stop();
     link.Close();
     SrtLink::GlobalCleanup();
-    std::printf("sent %llu frames, %llu packets, %.1f MB\n",
-                static_cast<unsigned long long>(frames),
-                static_cast<unsigned long long>(sent_pkts), bytes / 1e6);
+    std::printf("sent %llu video frames (%llu packets, %.1f MB) and %llu audio packets (%.1f MB)\n",
+                static_cast<unsigned long long>(frames.load()),
+                static_cast<unsigned long long>(sent_pkts.load()), bytes.load() / 1e6,
+                static_cast<unsigned long long>(audio_pkts.load()), audio_bytes.load() / 1e6);
     return 0;
 }

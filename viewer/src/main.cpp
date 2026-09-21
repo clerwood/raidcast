@@ -7,6 +7,7 @@
 // for the duration of the sink callback, so it is converted and presented there
 // rather than copied out.
 
+#include "audio_player.h"
 #include "decoder.h"
 #include "present.h"
 #include "raidcast/protocol.h"
@@ -39,6 +40,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
+    // Unbuffered: when stdout is redirected to a file the default full buffering
+    // hides everything until exit, which is useless for a live status display.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // WASAPI and the D3D11VA device both need COM on this thread.
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
     std::string   host    = "127.0.0.1";
     std::uint16_t port    = 41800;
@@ -94,8 +100,12 @@ int main(int argc, char** argv) {
     }
     std::printf("connected to %s:%u, SRT latency %d ms\n\n", host.c_str(), port, latency);
 
-    std::printf("%-6s %8s %8s %9s %9s %8s %9s\n",
-                "t", "frames", "Mbps", "dec p50", "reasm drop", "rtt ms", "lost");
+    std::printf("%-6s %8s %8s %9s %9s %8s %8s %8s\n",
+                "t", "frames", "Mbps", "dec p50", "reasm drop", "rtt ms", "aud ms", "a-under");
+
+    AudioPlayer audio;
+    bool        audio_ok = audio.Open(&err);
+    if (!audio_ok) std::printf("audio unavailable (%s) — video only\n", err.c_str());
 
     Presenter presenter;
     HWND      hwnd            = nullptr;
@@ -120,6 +130,13 @@ int main(int argc, char** argv) {
         }
         if (n > 0) {
             if (auto frame = reasm.Push(buf.data(), static_cast<std::size_t>(n))) {
+                if (frame->channel == Channel::Audio) {
+                    if (audio_ok) {
+                        std::string ae;
+                        audio.Push(frame->data.data(), frame->data.size(), &ae);
+                    }
+                    continue;
+                }
                 const auto t0 = std::chrono::steady_clock::now();
                 std::string de;
                 dec.Decode(frame->data.data(), frame->data.size(),
@@ -197,13 +214,14 @@ int main(int argc, char** argv) {
             next += std::chrono::seconds(1);
             std::sort(decode_ms.begin(), decode_ms.end());
             const auto st = link.Stats();
-            std::printf("%5.0fs %8llu %8.2f %9.2f %9llu %8.2f %9lld\n",
+            std::printf("%5.0fs %8llu %8.2f %9.2f %9llu %8.2f %8u %8llu\n",
                         std::chrono::duration<double>(now - start).count(),
                         static_cast<unsigned long long>(decoded - last_decoded),
                         (bytes - last_bytes) * 8.0 / 1e6,
                         decode_ms.empty() ? 0.0 : decode_ms[decode_ms.size() / 2],
                         static_cast<unsigned long long>(reasm.frames_dropped()),
-                        st.rtt_ms, static_cast<long long>(st.pkt_lost));
+                        st.rtt_ms, audio_ok ? audio.queued_ms() : 0u,
+                        static_cast<unsigned long long>(audio_ok ? audio.underruns() : 0));
             decode_ms.clear();
             last_decoded = decoded;
             last_bytes   = bytes;

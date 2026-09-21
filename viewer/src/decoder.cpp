@@ -32,7 +32,10 @@ struct Decoder::Impl {
     AVPacket*       pkt        = nullptr;
     AVFrame*        frame      = nullptr;
     AVFrame*        sw_frame   = nullptr;
+    bool            software   = false;
 };
+
+bool Decoder::software_fallback() const { return impl_ && impl_->software; }
 
 Decoder::Decoder() : impl_(std::make_unique<Impl>()) {}
 Decoder::~Decoder() { Close(); }
@@ -108,6 +111,7 @@ bool Decoder::Decode(const std::uint8_t* data, std::size_t len, std::int64_t pts
             f.width  = static_cast<std::uint32_t>(impl_->frame->width);
             f.height = static_cast<std::uint32_t>(impl_->frame->height);
             f.pts_us = impl_->frame->pts;
+            if (impl_->frame->format != AV_PIX_FMT_D3D11) impl_->software = true;
             if (impl_->frame->format == AV_PIX_FMT_D3D11) {
                 f.texture = reinterpret_cast<ID3D11Texture2D*>(impl_->frame->data[0]);
                 f.slice   = static_cast<std::uint32_t>(

@@ -5,6 +5,7 @@ add_executable(raidcast-viewer
     src/audio_player.cpp
     src/overlay.cpp
     src/connect_ui.cpp
+    src/gpu.cpp
 )
 
 target_link_libraries(raidcast-viewer PRIVATE

@@ -33,7 +33,16 @@ AMD or Intel all work. **WoW must be set to `Fullscreen (Windowed)`** in
 Options → Graphics, because Windows will not let us capture a game in true
 fullscreen.
 
-**The person watching (viewer):** nothing special.
+**The person watching (viewer):** a GPU that can decode HEVC — AMD, NVIDIA and
+Intel all can, going back roughly a decade. To check yours:
+
+```
+raidcast-viewer.exe --check
+```
+
+It lists every graphics adapter, says which can decode, and tests your audio
+output. If your machine has more than one GPU, RaidCast picks a capable one by
+itself; `--adapter N` overrides that using the numbers `--check` prints.
 
 ## Install
 
@@ -100,6 +109,7 @@ says what works, and names anything that does not:
 | `No visible Wow.exe window found` | WoW is in true fullscreen. Switch to `Fullscreen (Windowed)`. |
 | Frame rate drops to 30 while you play | Normal — WoW throttles itself when it is not the focused window. Raise *Max Background FPS* in WoW's options if it bothers you. |
 | `audio unavailable` | Needs Windows 10 2004 or newer. Run `--check` for the specific reason. |
+| Viewer window is blank but stats show frames arriving | Your GPU declined HEVC decode. Run `--check` and pick a listed adapter with `--adapter N`. |
 | Video is fine but there is no sound | Press **Tab** in the viewer. *Audio level* shows what is actually arriving: `silent` means the game is not making sound or the host is not capturing it — run `--check` on the host, which reports the captured level and which programs Windows thinks are playing audio. A dBFS figure means audio is arriving and playing, so check your own volume and output device. |
 | Viewer's host list is empty | The other person is not on your tailnet yet. Invite them from the Tailscale admin console, then press Refresh. |
 | Viewer says `cannot resolve` or `connect ... failed` | The viewer window shows your Tailscale state and what to do about it. Both machines must be signed in and online. |

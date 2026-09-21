@@ -41,6 +41,10 @@ public:
     // Copies the most recent frame to system memory as NV12. Diagnostics only.
     bool DumpLastNv12(const char* path, std::string* error = nullptr);
 
+    // True once a frame has come back in software rather than as a D3D11
+    // texture, which means hardware decode was declined and nothing will display.
+    bool software_fallback() const;
+
     void Close();
 
 private:

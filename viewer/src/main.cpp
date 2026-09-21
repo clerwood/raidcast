@@ -12,6 +12,7 @@
 #include "audio_player.h"
 #include "connect_ui.h"
 #include "decoder.h"
+#include "gpu.h"
 #include "overlay.h"
 #include "present.h"
 #include "raidcast/protocol.h"
@@ -45,6 +46,8 @@ int main(int argc, char** argv) {
     int           seconds  = 0;
     std::string   user     = "viewer";
     bool          headless = false;
+    bool          check    = false;
+    int           adapter  = -1;   // -1 = let D3D11 choose
     std::string   channel_override;
 
     for (int i = 1; i < argc; ++i) {
@@ -56,6 +59,8 @@ int main(int argc, char** argv) {
         else if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--user" && i + 1 < argc) user = argv[++i];
         else if (a == "--headless") headless = true;
+        else if (a == "--check") check = true;
+        else if (a == "--adapter" && i + 1 < argc) adapter = std::atoi(argv[++i]);
         // Session-only override of the saved update channel; does not persist.
         else if (a == "--channel" && i + 1 < argc) channel_override = argv[++i];
     }
@@ -63,17 +68,42 @@ int main(int argc, char** argv) {
     Log("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
 
+    // Readiness check: what this machine can decode, and on which GPU. Answers
+    // "will RaidCast work here?" without needing a host to connect to.
+    if (check) {
+        Log("graphics adapters:");
+        bool any_hevc = false;
+        for (const auto& a : EnumerateAdapters()) {
+            if (!a.d3d11) {
+                Log("  [%d] %-40s %s", a.index, a.name.c_str(),
+                    a.note.empty() ? "unusable" : a.note.c_str());
+                continue;
+            }
+            Log("  [%d] %-40s %5llu MB  HEVC %s  HEVC10 %s  H.264 %s", a.index, a.name.c_str(),
+                static_cast<unsigned long long>(a.vram_mb), a.hevc_main ? "yes" : "NO ",
+                a.hevc_main10 ? "yes" : "NO ", a.h264 ? "yes" : "NO ");
+            if (a.hevc_main) any_hevc = true;
+        }
+        if (!any_hevc)
+            Log("  -> no adapter reports HEVC decode. Update your graphics driver, or ask"
+                " the host to stream H.264.");
+
+        std::string aerr;
+        AudioPlayer probe;
+        const bool  audio_ok_probe = probe.Open(&aerr);
+        Log("audio output : %s", audio_ok_probe ? "ok" : ("FAILED - " + aerr).c_str());
+        probe.Close();
+        return any_hevc ? 0 : 1;
+    }
+
     winrt::com_ptr<ID3D11Device>        device;
     winrt::com_ptr<ID3D11DeviceContext> context;
-    D3D_FEATURE_LEVEL                   fl{};
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-                                     D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                                 nullptr, 0, D3D11_SDK_VERSION, device.put(), &fl,
-                                 context.put()))) {
-        FatalError("D3D11CreateDevice failed\n");
+    std::string                         gpu_name, gpu_err;
+    if (!CreateDeviceOnAdapter(adapter, &device, &context, &gpu_name, &gpu_err)) {
+        FatalError("%s", gpu_err.c_str());
         return 1;
     }
+    Log("gpu: %s", gpu_name.c_str());
     if (auto mt = device.try_as<ID3D11Multithread>()) mt->SetMultithreadProtected(TRUE);
 
     std::string err;
@@ -173,6 +203,7 @@ int main(int argc, char** argv) {
     // --- stream -------------------------------------------------------------
     Presenter                 presenter;
     bool                      presenter_ready = false;
+    bool                      software_warned = false;
     bool                      overlay_visible = true;
     ViewerControls            controls;
     controls.volume = settings.volume;
@@ -226,6 +257,15 @@ int main(int argc, char** argv) {
                                    ++decoded;
                                    stats.width  = f.width;
                                    stats.height = f.height;
+                                   if (!f.texture && want_ui && !software_warned) {
+                                       // Otherwise this is a blank window that
+                                       // decodes perfectly and explains nothing.
+                                       software_warned = true;
+                                       LogError("This GPU declined to decode HEVC, so nothing "
+                                                "can be displayed.");
+                                       LogError("Run with --check to see which adapters can, "
+                                                "then --adapter N to pick one.");
+                                   }
                                    if (!f.texture || !want_ui) return;
 
                                    if (!presenter_ready) {

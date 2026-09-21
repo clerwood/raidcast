@@ -10,6 +10,7 @@
 // happen afterwards, on the backbuffer, which is ours to hold.
 
 #include "audio_player.h"
+#include "connect_ui.h"
 #include "decoder.h"
 #include "overlay.h"
 #include "present.h"
@@ -37,10 +38,10 @@ int main(int argc, char** argv) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
     std::string   host;
-    std::uint16_t port    = 41800;
-    int           latency = 60;
-    int           seconds = 0;
-    std::string   user    = "viewer";
+    std::uint16_t port     = 41800;
+    int           latency  = 60;
+    int           seconds  = 0;
+    std::string   user     = "viewer";
     bool          headless = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -56,24 +57,6 @@ int main(int argc, char** argv) {
 
     std::printf("RaidCast viewer %s (protocol v%u)\n", RAIDCAST_VERSION,
                 static_cast<unsigned>(kProtocolMajor));
-
-    // Launched from a Start Menu shortcut there are no arguments, so ask rather
-    // than failing against a default nobody meant.
-    if (host.empty()) {
-        std::printf("\nEnter the host's Tailscale address or machine name\n"
-                    "(the 100.x.y.z shown by the Tailscale tray icon): ");
-        std::fflush(stdout);
-        char line[256] = {};
-        if (!std::fgets(line, sizeof(line), stdin)) return 1;
-        host = line;
-        while (!host.empty() && (host.back() == '\n' || host.back() == '\r' ||
-                                 host.back() == ' ' || host.back() == '\t'))
-            host.pop_back();
-        if (host.empty()) {
-            std::fprintf(stderr, "No address given.\n");
-            return 1;
-        }
-    }
 
     winrt::com_ptr<ID3D11Device>        device;
     winrt::com_ptr<ID3D11DeviceContext> context;
@@ -103,29 +86,77 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
-    SrtLink link;
-    if (!link.Connect(host, port, latency, MakeStreamId(user), &err)) {
-        std::fprintf(stderr, "connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
-        return 1;
-    }
-    std::printf("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
 
+    const bool want_ui = !headless;
     AppWindow  window;
     ImGuiShell shell;
     Updater    updater;
-    const bool want_ui = !headless;
     if (want_ui) {
-        if (!window.Create(L"RaidCast", 1280, 720, &err) ||
+        if (!window.Create(L"RaidCast", 720, 520, &err) ||
             !shell.Init(window.hwnd(), device.get(), context.get(), &err)) {
             std::fprintf(stderr, "UI init failed: %s\n", err.c_str());
             return 1;
         }
         updater.CheckAsync(RAIDCAST_VERSION);
-    } else {
-        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s\n", "t", "frames", "Mbps", "dec p50",
-                    "drops", "rtt ms", "aud ms");
     }
 
+    // --- pick a host --------------------------------------------------------
+    SrtLink link;
+    if (host.empty() && !want_ui) {
+        std::fprintf(stderr, "--host is required with --headless\n");
+        return 1;
+    }
+
+    if (host.empty()) {
+        // Connect phase gets its own swapchain; the presenter takes over the
+        // window once video starts, and DXGI will not allow both at once.
+        UiSwapchain  connect_swap;
+        ConnectPanel panel;
+        std::string  last_error;
+        bool         connected = false;
+
+        if (!connect_swap.Init(device.get(), window.hwnd(), &err)) {
+            std::fprintf(stderr, "UI swapchain failed: %s\n", err.c_str());
+            return 1;
+        }
+
+        while (!connected) {
+            if (!window.Pump()) return 0;
+
+            std::uint32_t w = 0, h = 0;
+            window.Size(&w, &h);
+            connect_swap.ResizeIfNeeded(w, h);
+
+            shell.NewFrame();
+            const ConnectChoice choice = panel.Draw(last_error);
+            updater.DrawToast();
+            shell.RenderTo(context.get(), connect_swap.rtv());
+            connect_swap.Present();
+
+            if (choice.quit) return 0;
+            if (!choice.connect) continue;
+
+            std::printf("connecting to %s:%u...\n", choice.host.c_str(), port);
+            if (link.Connect(choice.host, port, latency, MakeStreamId(user), &err)) {
+                host      = choice.host;
+                connected = true;
+            } else {
+                last_error = err;
+                std::fprintf(stderr, "%s\n", err.c_str());
+            }
+        }
+        connect_swap.Reset(context.get());
+    } else if (!link.Connect(host, port, latency, MakeStreamId(user), &err)) {
+        std::fprintf(stderr, "connect to %s:%u failed: %s\n", host.c_str(), port, err.c_str());
+        return 1;
+    }
+
+    std::printf("connected to %s:%u, SRT latency %d ms\n", host.c_str(), port, latency);
+    if (!want_ui)
+        std::printf("\n%-6s %8s %8s %9s %9s %8s %8s\n", "t", "frames", "Mbps", "dec p50",
+                    "drops", "rtt ms", "aud ms");
+
+    // --- stream -------------------------------------------------------------
     Presenter                 presenter;
     bool                      presenter_ready = false;
     bool                      overlay_visible = true;

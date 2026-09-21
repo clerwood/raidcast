@@ -1,0 +1,3 @@
+add_library(raidcast_tailnet STATIC tailscale.cpp)
+target_include_directories(raidcast_tailnet PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(raidcast_tailnet PUBLIC raidcast_common PRIVATE nlohmann_json::nlohmann_json)

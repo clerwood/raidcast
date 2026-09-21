@@ -31,6 +31,7 @@ target_link_libraries(raidcast-host PRIVATE
     raidcast_capture
     raidcast_encode
     raidcast_transport
+    raidcast_tailnet
     raidcast_ui
     mmdevapi       # WASAPI process loopback
 )

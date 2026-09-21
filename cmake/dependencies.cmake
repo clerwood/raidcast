@@ -42,7 +42,19 @@ FetchContent_Declare(imgui
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(srt imgui)
+# --- nlohmann/json -----------------------------------------------------------
+# `tailscale status --json` is deeply nested (a map of peers, a map of users,
+# RFC3339 timestamps). String-scraping it would be fragile in a way that fails
+# silently, which is the opposite of what the Tailscale layer is for.
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+)
+
+FetchContent_MakeAvailable(srt imgui nlohmann_json)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp

@@ -91,6 +91,18 @@ bool HostPanel::Draw(const HostStatus& s) {
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90.0f);
     if (ImGui::Button("Stop", ImVec2(80, 0))) stop = true;
 
+    // Tailscale state sits above the preview because when it is wrong, nothing
+    // below it matters.
+    if (!s.tailnet_line.empty()) {
+        ImGui::TextColored(Health(s.tailnet_ok), "Tailscale: %s", s.tailnet_line.c_str());
+        if (!s.allow_summary.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("- %s", s.allow_summary.c_str());
+        }
+    }
+    if (!s.tailnet_advice.empty())
+        ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f), "%s", s.tailnet_advice.c_str());
+
     ImGui::Separator();
 
     // --- preview ------------------------------------------------------------

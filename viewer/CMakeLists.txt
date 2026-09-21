@@ -4,11 +4,13 @@ add_executable(raidcast-viewer
     src/present.cpp
     src/audio_player.cpp
     src/overlay.cpp
+    src/connect_ui.cpp
 )
 
 target_link_libraries(raidcast-viewer PRIVATE
     raidcast_common
     raidcast_transport
+    raidcast_tailnet
     raidcast_ui
     ffmpeg
     d3d11

@@ -56,6 +56,10 @@ public:
     // >0 bytes received, 0 on timeout, -1 on error or disconnect.
     int Recv(std::uint8_t* buf, std::size_t cap, int timeout_ms, std::string* error = nullptr);
 
+    // Closes the accepted connection but keeps listening. Used when a caller is
+    // rejected: one unauthorised peer must not end the host's session.
+    void DropPeer();
+
     bool      connected() const { return sock_ != -1; }
     LinkStats Stats() const;
     void      Close();

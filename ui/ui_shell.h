@@ -41,6 +41,10 @@ public:
     ID3D11RenderTargetView* rtv() const { return rtv_.get(); }
     void Present();
 
+    // Releases the swapchain so another can be created for the same window.
+    // DXGI refuses a second swapchain on an HWND while the first is alive.
+    void Reset(ID3D11DeviceContext* ctx);
+
 private:
     winrt::com_ptr<ID3D11Device>           device_;
     winrt::com_ptr<IDXGISwapChain1>        swap_;

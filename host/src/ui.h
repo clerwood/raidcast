@@ -25,6 +25,11 @@ struct HostStatus {
     std::uint32_t width = 0, height = 0;
     std::uint32_t bitrate_cap_mbps = 0;
 
+    std::string   tailnet_line;    // "waitless (100.x.y.z)", or the problem
+    std::string   tailnet_advice;  // one actionable sentence, empty when healthy
+    std::string   allow_summary;   // who is permitted to connect
+    bool          tailnet_ok = false;
+
     double        fps        = 0;
     double        mbps       = 0;
     double        audio_kbps = 0;

@@ -117,6 +117,18 @@ bool UiSwapchain::ResizeIfNeeded(std::uint32_t w, std::uint32_t h) {
     return SUCCEEDED(device_->CreateRenderTargetView(back.get(), nullptr, rtv_.put()));
 }
 
+void UiSwapchain::Reset(ID3D11DeviceContext* ctx) {
+    if (ctx) {
+        // A bound render target keeps a reference alive and the release silently
+        // does nothing, so unbind and flush before dropping it.
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->Flush();
+    }
+    rtv_  = nullptr;
+    swap_ = nullptr;
+    w_ = h_ = 0;
+}
+
 void UiSwapchain::Present() {
     if (swap_) swap_->Present(1, 0);  // UI is not latency-critical; pace it to vblank
 }

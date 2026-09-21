@@ -241,6 +241,13 @@ LinkStats SrtLink::Stats() const {
     return out;
 }
 
+void SrtLink::DropPeer() {
+    if (sock_ != -1) {
+        srt_close(sock_);
+        sock_ = -1;
+    }
+}
+
 void SrtLink::Close() {
     if (sock_ != -1) {
         srt_close(sock_);

@@ -61,10 +61,15 @@ The window shows `Waiting for viewer...` until someone connects, then live stats
 
 ### Watching someone's game
 
-Open **RaidCast Viewer**. It asks for the host's address — paste the `100.x.y.z`
-from their Tailscale tray icon, or type their Tailscale machine name.
+Open **RaidCast Viewer**. It lists the machines on your tailnet — pick theirs and
+press **Connect**. Each entry says whether the connection is **direct** or
+**relayed**; relayed will not carry video well, so it warns you before connecting
+rather than after the picture goes bad.
 
-Press **Tab** in the viewer window to show or hide connection stats.
+If their machine isn't listed yet, press **Refresh**. You can also type an address
+or machine name directly.
+
+Press **Tab** once connected to show or hide connection stats.
 
 ### Before a raid night
 
@@ -82,7 +87,9 @@ says what works, and names anything that does not:
 | `No visible Wow.exe window found` | WoW is in true fullscreen. Switch to `Fullscreen (Windowed)`. |
 | Frame rate drops to 30 while you play | Normal — WoW throttles itself when it is not the focused window. Raise *Max Background FPS* in WoW's options if it bothers you. |
 | `audio unavailable` | Needs Windows 10 2004 or newer. Run `--check` for the specific reason. |
-| Viewer says `cannot resolve` or `connect ... failed` | Check `tailscale status` on both machines. Both must be signed in and online. |
+| Viewer's host list is empty | The other person is not on your tailnet yet. Invite them from the Tailscale admin console, then press Refresh. |
+| Viewer says `cannot resolve` or `connect ... failed` | The viewer window shows your Tailscale state and what to do about it. Both machines must be signed in and online. |
+| Host says `not on the allowlist` | You started the host with `--allow`, and the caller's Tailscale login isn't listed. |
 | Stream is choppy or blurry | Confirm Tailscale connected you **directly**. Run `tailscale status` on the host: a `relay` connection instead of `direct` cannot carry video. Forwarding UDP port 41641 to the host usually fixes it. |
 | `host protocol vN, viewer vM` | The two machines are on different RaidCast versions. Update both. |
 
@@ -92,8 +99,20 @@ Both programs accept `--port` (default 41800) if 41800 is taken, and `--latency`
 in milliseconds (default 60) — raise it on a poor connection to trade delay for
 stability.
 
-The host also takes `--bitrate` in Mbps (default 25). That is a ceiling, not a
-target; a quiet screen uses far less.
+The host also takes `--bitrate` in Mbps (default 25) — a ceiling, not a target; a
+quiet screen uses far less.
+
+By default **anyone on your tailnet may connect**, which is usually what you want
+for a tailnet you control. To narrow it, pass the viewer's Tailscale login:
+
+```
+raidcast-host.exe --allow them@example.com
+```
+
+The host verifies callers with `tailscale whois`, so this checks who they actually
+are rather than what they claim. If you are inviting someone to your tailnet just
+for this, [docs/SECURITY.md](docs/SECURITY.md) covers locking their access down to
+RaidCast alone.
 
 ## Building from source
 

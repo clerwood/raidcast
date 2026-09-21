@@ -22,6 +22,7 @@
 #include "encoder.h"
 #include "raidcast/protocol.h"
 #include "srt_link.h"
+#include "tailscale.h"
 #include "ui.h"
 #include "ui_shell.h"
 #include "updater.h"
@@ -51,6 +52,8 @@ struct Options {
     int           seconds  = 0;    // 0 = until the window closes
     bool          check    = false;
     bool          headless = false;
+    // Permitted tailnet logins. Empty means any tailnet member may connect.
+    std::vector<std::string> allow;
 };
 
 std::wstring Widen(const char* s) {
@@ -106,6 +109,7 @@ int main(int argc, char** argv) {
         else if (a == "--seconds" && i + 1 < argc) opt.seconds = std::atoi(argv[++i]);
         else if (a == "--check") opt.check = true;
         else if (a == "--headless") opt.headless = true;
+        else if (a == "--allow" && i + 1 < argc) opt.allow.push_back(argv[++i]);
     }
 
     std::printf("RaidCast host %s (protocol v%u)\n", RAIDCAST_VERSION,
@@ -189,7 +193,29 @@ int main(int argc, char** argv) {
             std::printf("  audio    : FAILED - %s\n", aerr.c_str());
         }
         std::printf("  encoder  : ok (%s)\n", enc.codec_name());
-        return (capture_ok && audio_ok) ? 0 : 1;
+
+        const TailStatus ts = QueryStatus();
+        if (ts.usable()) {
+            std::printf("  tailscale: ok (%s as %s%s%s)\n", ts.self_name.c_str(),
+                        ts.self_ip.c_str(),
+                        ts.self_login.empty() ? "" : ", ",
+                        ts.self_login.c_str());
+            if (ts.key_expiry_days >= 0)
+                std::printf("             key expires in %d day(s)\n", ts.key_expiry_days);
+            std::printf("             %zu peer(s)\n", ts.peers.size());
+            for (const auto& p : ts.peers) {
+                const std::string path =
+                    p.relayed ? ("relayed via " + p.relay) : std::string("direct");
+                std::printf("               %-20s %-16s %-8s %s\n", p.name.c_str(),
+                            p.ip.c_str(), p.online ? "online" : "offline", path.c_str());
+            }
+        } else {
+            std::printf("  tailscale: NOT READY (%s)\n", ts.backend_state.c_str());
+        }
+        if (const auto advice = AdviceFor(ts); !advice.empty())
+            std::printf("             -> %s\n", advice.c_str());
+
+        return (capture_ok && audio_ok && ts.usable()) ? 0 : 1;
     }
 
     // --- transport ----------------------------------------------------------
@@ -351,6 +377,31 @@ int main(int argc, char** argv) {
     status.bitrate_cap_mbps = opt.bitrate / 1000000;
     status.srt_latency_ms   = opt.latency;
 
+    // Queried once at startup, not on a timer: tailnet membership changes on the
+    // order of days (DESIGN.md §10).
+    {
+        const TailStatus ts = QueryStatus();
+        status.tailnet_ok   = ts.usable();
+        status.tailnet_line = ts.usable() ? (ts.self_name + " (" + ts.self_ip + ")")
+                                          : (ts.backend_state.empty() ? ts.error
+                                                                      : ts.backend_state);
+        status.tailnet_advice = AdviceFor(ts);
+        if (!status.tailnet_advice.empty())
+            std::printf("tailscale: %s\n", status.tailnet_advice.c_str());
+    }
+
+    if (opt.allow.empty()) {
+        // Tailnet membership is already an authorization boundary - only peers on
+        // the tailnet can reach the port at all - so accepting any member is a
+        // defensible default. It is stated plainly rather than left implicit.
+        status.allow_summary = "any tailnet member may connect";
+    } else {
+        status.allow_summary = "restricted to " + opt.allow[0];
+        for (std::size_t i = 1; i < opt.allow.size(); ++i)
+            status.allow_summary += ", " + opt.allow[i];
+    }
+    std::printf("access: %s\n", status.allow_summary.c_str());
+
     const auto    start = std::chrono::steady_clock::now();
     auto          next  = start + std::chrono::seconds(1);
     std::uint64_t last_bytes = 0, last_frames = 0, last_audio = 0;
@@ -378,15 +429,37 @@ int main(int argc, char** argv) {
                                  static_cast<unsigned>(parsed->major));
                     break;
                 }
-                status.peer = (parsed->user.empty() ? std::string("unknown") : parsed->user) +
-                              " (" + peer_addr + ")";
+                // The caller's tailnet identity, not the name they claimed in the
+                // stream id, is what authorizes them (DESIGN.md D10).
+                std::string whois_err;
+                const auto  verified = WhoIs(peer_addr, &whois_err);
+
+                if (!opt.allow.empty()) {
+                    const bool permitted =
+                        verified && std::find(opt.allow.begin(), opt.allow.end(), *verified) !=
+                                        opt.allow.end();
+                    if (!permitted) {
+                        std::fprintf(stderr, "rejected %s: %s is not on the allowlist\n",
+                                     peer_addr.c_str(),
+                                     verified ? verified->c_str() : "unidentified caller");
+                        if (!verified)
+                            std::fprintf(stderr, "  (%s)\n", whois_err.c_str());
+                        // One unauthorised caller must not end the session.
+                        link.DropPeer();
+                        continue;
+                    }
+                }
+
+                status.peer = (verified ? *verified
+                                        : (parsed->user.empty() ? std::string("unverified")
+                                                                : parsed->user + " (unverified)")) +
+                              " at " + peer_addr;
                 connected.store(true, std::memory_order_release);
                 // Without this the viewer receives a perfectly healthy stream it
                 // cannot decode until the next safety IDR, up to ten seconds away.
                 enc.RequestKeyframe();
                 std::printf("viewer connected: %s\n", status.peer.c_str());
-                // TODO(M2): `tailscale whois` the peer and check the allowlist (D10).
-            }
+                        }
         }
 
         if (capture.closed()) {
